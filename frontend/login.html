@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NeuroGrid — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #09090B;
+      --surface: #18181B;
+      --surface2: #27272A;
+      --border: #3F3F46;
+      --text: #FAFAFA;
+      --muted: #A1A1AA;
+      --accent: #8B5CF6;
+      --accent-dim: rgba(139,92,246,0.15);
+      --accent-glow: rgba(139,92,246,0.4);
+      --error: #F87171;
+      --font: 'Inter', system-ui, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* Stars background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        radial-gradient(1px 1px at 10% 20%, #ffffff33 0%, transparent 100%),
+        radial-gradient(1px 1px at 30% 60%, #ffffff22 0%, transparent 100%),
+        radial-gradient(1px 1px at 50% 10%, #ffffff44 0%, transparent 100%),
+        radial-gradient(1px 1px at 70% 80%, #ffffff22 0%, transparent 100%),
+        radial-gradient(1px 1px at 90% 40%, #ffffff33 0%, transparent 100%),
+        radial-gradient(1px 1px at 15% 75%, #ffffff22 0%, transparent 100%),
+        radial-gradient(1px 1px at 45% 90%, #ffffff33 0%, transparent 100%),
+        radial-gradient(1px 1px at 80% 15%, #ffffff22 0%, transparent 100%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .card {
+      position: relative;
+      z-index: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 380px;
+      box-shadow: 0 0 60px rgba(139,92,246,0.12), 0 24px 48px rgba(0,0,0,0.5);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .logo-icon svg { width: 22px; height: 22px; }
+
+    .logo-text {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #FAFAFA 0%, #8B5CF6 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+    p.sub { font-size: 13px; color: var(--muted); margin-bottom: 28px; line-height: 1.5; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 6px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    input[type="password"] {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 14px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: var(--font);
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    input[type="password"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+
+    .error-msg {
+      font-size: 12px;
+      color: var(--error);
+      margin-top: 8px;
+      display: none;
+    }
+
+    .error-msg.visible { display: block; }
+
+    button[type="submit"] {
+      width: 100%;
+      margin-top: 20px;
+      padding: 12px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: opacity 0.2s, box-shadow 0.2s;
+    }
+
+    button[type="submit"]:hover {
+      opacity: 0.9;
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    button[type="submit"]:active { opacity: 0.8; }
+
+    .hint {
+      margin-top: 20px;
+      padding: 10px 12px;
+      background: var(--surface2);
+      border-radius: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .hint code {
+      color: var(--accent);
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <div class="logo-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="1.5">
+          <circle cx="12" cy="12" r="3"/>
+          <circle cx="4" cy="4" r="2"/>
+          <circle cx="20" cy="4" r="2"/>
+          <circle cx="4" cy="20" r="2"/>
+          <circle cx="20" cy="20" r="2"/>
+          <line x1="12" y1="9" x2="5.5" y2="5.5"/>
+          <line x1="12" y1="9" x2="18.5" y2="5.5"/>
+          <line x1="12" y1="15" x2="5.5" y2="18.5"/>
+          <line x1="12" y1="15" x2="18.5" y2="18.5"/>
+        </svg>
+      </div>
+      <span class="logo-text">NeuroGrid</span>
+    </div>
+
+    <h1>Welcome back</h1>
+    <p class="sub">Your GATE CS concept knowledge graph. Enter your password to continue.</p>
+
+    <label for="pw">Password</label>
+    <input type="password" id="pw" placeholder="Enter password" autofocus />
+    <div class="error-msg" id="err">Incorrect password. Try again.</div>
+
+    <button type="submit" id="loginBtn">Unlock NeuroGrid →</button>
+
+    <div class="hint">Default password: <code>neurogrid</code></div>
+  </div>
+
+  <script>
+    const DEFAULT_HASH = 'd6c3cf48e43daa7c6d14e6e3883af26e3d053a4684229f888880f3097dcdf45f';
+
+    async function sha256(str) {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+
+    document.getElementById('loginBtn').addEventListener('click', async () => {
+      const pw = document.getElementById('pw').value;
+      const hash = await sha256(pw);
+      const stored = localStorage.getItem('ng_pwhash') || DEFAULT_HASH;
+      if (hash === stored) {
+        sessionStorage.setItem('ng_auth', '1');
+        window.location.href = 'app.html';
+      } else {
+        document.getElementById('err').classList.add('visible');
+        document.getElementById('pw').style.borderColor = 'var(--error)';
+      }
+    });
+
+    document.getElementById('pw').addEventListener('keydown', e => {
+      if (e.key === 'Enter') document.getElementById('loginBtn').click();
+      document.getElementById('err').classList.remove('visible');
+      document.getElementById('pw').style.borderColor = '';
+    });
+
+    // Already logged in?
+    if (sessionStorage.getItem('ng_auth') === '1') {
+      window.location.href = 'app.html';
+    }
+  </script>
+</body>
+</html>

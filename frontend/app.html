@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NeuroGrid</title>
+  <link rel="stylesheet" href="css/main.css" />
+
+  <!-- Three.js via importmap (ES modules) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <!-- Konva (global) — must load before module scripts -->
+  <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     TOPBAR  (persistent across all views)
+═══════════════════════════════════════════ -->
+<header class="topbar" id="topbar">
+  <div class="topbar-left">
+    <div class="logo-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="1.5">
+        <circle cx="12" cy="12" r="3"/>
+        <circle cx="4" cy="4" r="2"/><circle cx="20" cy="4" r="2"/>
+        <circle cx="4" cy="20" r="2"/><circle cx="20" cy="20" r="2"/>
+        <line x1="12" y1="9" x2="5.5" y2="5.5"/>
+        <line x1="12" y1="9" x2="18.5" y2="5.5"/>
+        <line x1="12" y1="15" x2="5.5" y2="18.5"/>
+        <line x1="12" y1="15" x2="18.5" y2="18.5"/>
+      </svg>
+    </div>
+    <nav class="breadcrumb" id="breadcrumb">
+      <span class="bc-item active">Galaxy</span>
+    </nav>
+  </div>
+  <div class="topbar-right">
+    <button class="btn-icon" id="btnLogout" title="Logout">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+        <polyline points="16 17 21 12 16 7"/>
+        <line x1="21" y1="12" x2="9" y2="12"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════
+     SCREEN 1 — GALAXY VIEW
+═══════════════════════════════════════════ -->
+<section class="screen" id="screen-galaxy">
+  <div class="galaxy-container" id="galaxy-container"></div>
+  <div class="galaxy-hud">
+    <div class="galaxy-hint">Drag to orbit · Scroll to zoom · Click a cube to enter</div>
+    <div class="galaxy-actions">
+      <button class="btn-primary" id="btnAddSubject">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add Subject
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SCREEN 2 — CUBE INTERIOR
+═══════════════════════════════════════════ -->
+<section class="screen" id="screen-cube">
+  <div class="cube-container" id="cube-container"></div>
+  <div class="cube-hud">
+    <div class="cube-actions-left">
+      <button class="btn-secondary" id="btnBackGalaxy">← Galaxy</button>
+      <button class="btn-secondary" id="btnResetCube">Reset View</button>
+    </div>
+    <div class="cube-actions-right">
+      <button class="btn-ghost" id="btnLinkMode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+          <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/>
+        </svg>
+        Link Mode
+      </button>
+      <button class="btn-primary" id="btnAddNode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add Node
+      </button>
+    </div>
+  </div>
+  <div class="link-mode-banner" id="linkModeBanner" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14">
+      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+    </svg>
+    Link Mode — Click first node, then second node to create a connection
+    <button class="btn-cancel-link" id="btnCancelLink">Cancel</button>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SCREEN 3 — NODE WHITEBOARD
+═══════════════════════════════════════════ -->
+<section class="screen" id="screen-node-wb">
+  <div class="wb-layout">
+    <!-- Toolbar -->
+    <div class="wb-toolbar" id="nodeToolbar">
+      <div class="tool-group">
+        <button class="tool-btn active" data-tool="select" title="Select (V)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M5 3l14 9-7 1-4 7z"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="pen" title="Pen (P)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+            <path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="text" title="Text (T)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/>
+            <line x1="12" y1="4" x2="12" y2="20"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="rect" title="Rectangle (R)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="eraser" title="Eraser (E)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M20 20H7L3 16l10-10 7 7-3.5 3.5"/><path d="M6.01 11L13 4"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tool-group tool-group-mid">
+        <input type="color" class="color-picker" id="nodeColorPicker" value="#8B5CF6" title="Stroke color" />
+        <div class="stroke-sizes">
+          <button class="stroke-btn active" data-size="2" style="--s:2px"></button>
+          <button class="stroke-btn" data-size="4" style="--s:4px"></button>
+          <button class="stroke-btn" data-size="8" style="--s:8px"></button>
+        </div>
+      </div>
+      <div class="tool-group">
+        <button class="tool-btn" id="nodeUndo" title="Undo (Ctrl+Z)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/>
+          </svg>
+        </button>
+        <button class="tool-btn" id="nodeRedo" title="Redo (Ctrl+Y)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 014-4h12"/>
+          </svg>
+        </button>
+        <button class="tool-btn" id="nodeClear" title="Clear canvas">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tool-group">
+        <button class="btn-secondary btn-sm" id="btnBackFromNode">← Cube</button>
+      </div>
+    </div>
+
+    <!-- Canvas + Sidebar -->
+    <div class="wb-body">
+      <div class="wb-canvas-wrap" id="nodeCanvasWrap">
+        <div id="nodeCanvas"></div>
+      </div>
+      <aside class="wb-sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-label">Concept</div>
+          <div class="node-info-card" id="nodeInfoCard">
+            <div class="nic-badge" id="nodeSubjectBadge"></div>
+            <div class="nic-title" id="nodeTitle">—</div>
+            <div class="nic-unit" id="nodeUnit"></div>
+          </div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Connections</div>
+          <div id="nodeConnList" class="conn-list"></div>
+        </div>
+        <div class="sidebar-section flex-1">
+          <div class="sidebar-label">Quick Notes</div>
+          <textarea id="nodeNotesInput" placeholder="Key points, formulas, mnemonics..." class="notes-textarea"></textarea>
+        </div>
+        <div class="sidebar-section">
+          <button class="btn-danger-sm" id="btnDeleteNode">Delete Node</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SCREEN 4 — EDGE WHITEBOARD
+═══════════════════════════════════════════ -->
+<section class="screen" id="screen-edge-wb">
+  <div class="wb-layout">
+    <!-- Toolbar (reuses same structure) -->
+    <div class="wb-toolbar" id="edgeToolbar">
+      <div class="tool-group">
+        <button class="tool-btn active" data-tool="select" title="Select">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M5 3l14 9-7 1-4 7z"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="pen" title="Pen">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+          </svg>
+        </button>
+        <button class="tool-btn" data-tool="text" title="Text">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/>
+            <line x1="12" y1="4" x2="12" y2="20"/>
+          </svg>
+        </button>
+      </div>
+      <div class="tool-group">
+        <input type="color" class="color-picker" id="edgeColorPicker" value="#F59E0B" />
+        <div class="stroke-sizes">
+          <button class="stroke-btn active" data-size="2" style="--s:2px"></button>
+          <button class="stroke-btn" data-size="4" style="--s:4px"></button>
+        </div>
+      </div>
+      <div class="tool-group">
+        <button class="tool-btn" id="edgeUndo" title="Undo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 00-4-4H4"/></svg></button>
+        <button class="tool-btn" id="edgeRedo" title="Redo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 014-4h12"/></svg></button>
+      </div>
+      <div class="tool-group">
+        <button class="btn-secondary btn-sm" id="btnBackFromEdge">← Cube</button>
+      </div>
+    </div>
+
+    <div class="wb-body">
+      <div class="wb-canvas-wrap" id="edgeCanvasWrap">
+        <div id="edgeCanvas"></div>
+      </div>
+      <aside class="wb-sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-label">Link Details</div>
+          <div class="edge-card" id="edgeCard">
+            <div class="edge-node-pill" id="edgeFromPill"></div>
+            <div class="edge-arrow">↕</div>
+            <div class="edge-node-pill" id="edgeToPill"></div>
+          </div>
+          <div class="rel-badge-wrap" id="edgeRelBadge"></div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">From</div>
+          <div class="excerpt-box" id="edgeFromNotes"></div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">To</div>
+          <div class="excerpt-box" id="edgeToNotes"></div>
+        </div>
+        <div class="sidebar-section flex-1">
+          <div class="sidebar-label">Why this connection?</div>
+          <textarea id="edgeNotesInput" placeholder="Key insight about this relationship..." class="notes-textarea"></textarea>
+        </div>
+        <div class="sidebar-section">
+          <button class="btn-danger-sm" id="btnDeleteEdge">Remove Link</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     MODAL OVERLAY
+═══════════════════════════════════════════ -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h3 class="modal-title" id="modalTitle">Modal</h3>
+      <button class="modal-close" id="modalClose">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer">
+      <button class="btn-secondary" id="modalCancel">Cancel</button>
+      <button class="btn-primary" id="modalConfirm">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     CONTEXT MENU
+═══════════════════════════════════════════ -->
+<div class="ctx-menu" id="ctxMenu" style="display:none"></div>
+
+<!-- Main module entry -->
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
