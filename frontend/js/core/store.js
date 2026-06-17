@@ -1,273 +1,195 @@
-// store.js — Data layer with localStorage persistence
-// All data lives here. No data logic anywhere else.
+// store.js — Data layer v2: Workspaces → Subjects → Units → Nodes → Edges
+const KEY = 'neurogrid_v2';
 
-const KEY = 'neurogrid_v1';
+const COLORS = ['#7C3AED','#10B981','#6366F1','#F59E0B','#EF4444',
+                '#EC4899','#14B8A6','#84CC16','#F97316','#06B6D4'];
 
-/* ── Seed data (GATE CS subjects) ───────── */
-const GATE_SUBJECTS_SEED = [
-  { name: 'Operating Systems',       label: 'OS',   color: '#10B981' },
-  { name: 'DBMS',                    label: 'DB',   color: '#6366F1' },
-  { name: 'Computer Networks',       label: 'CN',   color: '#F59E0B' },
-  { name: 'Algorithms',              label: 'ALGO', color: '#EF4444' },
-  { name: 'Theory of Computation',   label: 'TOC',  color: '#EC4899' },
-  { name: 'Computer Architecture',   label: 'COA',  color: '#14B8A6' },
-  { name: 'Discrete Mathematics',    label: 'DM',   color: '#84CC16' },
-];
+/* ── Auto-position helpers ─────────────────── */
+const GOLDEN_ANGLE = 2.399963229;
 
-/* ── Default empty store ────────────────── */
-const makeDefault = () => ({ subjects: {}, nodes: {}, edges: {} });
+export function calcSubjectPosition(idx) {
+  if (idx === 0) return [0, 0, 0];
+  const angle  = idx * GOLDEN_ANGLE;
+  const tier   = Math.floor(idx / 6);
+  const radius = 4.5 + tier * 3.5;
+  const y      = (idx % 5 - 2) * 1.3;
+  return [+(Math.cos(angle)*radius).toFixed(3), +y.toFixed(3), +(Math.sin(angle)*radius).toFixed(3)];
+}
 
-/* ── Helpers ────────────────────────────── */
+export function calcUnitPosition(idx) {
+  const UNIT_GRID = [
+    [0,0,0],[0.45,0,0.1],[-0.45,0,-0.1],[0.1,0,0.45],[-0.1,0,-0.45],
+    [0,0.35,0.3],[0,-0.35,-0.3],[0.4,0.3,-0.2],[-0.4,-0.3,0.2],
+    [0.3,-0.3,0.35],[-0.3,0.3,-0.35],
+  ];
+  if (idx < UNIT_GRID.length) return [...UNIT_GRID[idx]];
+  const a = idx * GOLDEN_ANGLE;
+  return [+(Math.cos(a)*0.5).toFixed(3), +((idx%3-1)*0.25).toFixed(3), +(Math.sin(a)*0.5).toFixed(3)];
+}
+
+export function calcNodePosition(idx) {
+  const PRESETS = [
+    [0,0,0],[0.5,0.2,0.1],[-0.5,0.2,-0.1],[0.1,0.5,-0.2],[-0.1,-0.5,0.2],
+    [0.4,-0.2,0.45],[-0.4,0.2,-0.45],[0,0.6,0.1],[0,-0.6,-0.1],
+    [0.6,0,-0.3],[-0.6,0,0.3],[0.3,0.45,0.4],[-0.3,-0.45,-0.4],
+    [0.45,-0.4,0.2],[-0.45,0.4,-0.2],[0.2,0.3,-0.6],[-0.2,-0.3,0.6],
+    [0.55,0.35,0.2],[-0.55,-0.35,-0.2],[0.1,0.6,-0.35],[-0.1,-0.6,0.35],
+  ];
+  if (idx < PRESETS.length) return [...PRESETS[idx]];
+  const level = Math.floor(idx/8);
+  const a = idx * GOLDEN_ANGLE;
+  const r = 0.55 + level*0.12;
+  const y = Math.sin(idx*1.1)*(0.45+level*0.05);
+  return [+(Math.cos(a)*r).toFixed(3), +y.toFixed(3), +(Math.sin(a)*r).toFixed(3)];
+}
+
+/* ── UUID ───────────────────────────────────── */
 export function uuid() {
-  return crypto.randomUUID
-    ? crypto.randomUUID()
-    : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-        const r = Math.random() * 16 | 0;
-        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-      });
+  return crypto.randomUUID?.() ||
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random()*16|0;
+      return (c==='x'?r:(r&0x3|0x8)).toString(16);
+    });
 }
 
-/**
- * Auto-position subject cubes in galaxy (circular layout).
- * Called when adding a new subject — position stored permanently.
- */
-export function calcSubjectPosition(existingCount) {
-  if (existingCount === 0) return [0, 0, 0];
-  const angle = (existingCount / Math.max(existingCount, 1)) * Math.PI * 2;
-  const radius = 3 + existingCount * 0.8;
-  return [
-    parseFloat((Math.cos(angle) * radius).toFixed(3)),
-    parseFloat(((existingCount % 2 === 0 ? 0.4 : -0.4)).toFixed(3)),
-    parseFloat((Math.sin(angle) * radius).toFixed(3)),
-  ];
-}
-
-/**
- * Auto-position nodes inside a cube (Fibonacci sphere).
- * Called when adding a new node — position stored permanently.
- */
-export function calcNodePosition(existingCount) {
-  if (existingCount === 0) return [0, 0, 0];
-  const PHI = Math.PI * (3.0 - Math.sqrt(5.0)); // golden angle
-  const total = Math.max(existingCount, 1);
-  const y = 1.0 - (existingCount / total) * 2.0;
-  const r = Math.sqrt(Math.max(0, 1.0 - y * y));
-  const theta = PHI * existingCount;
-  const scale = 0.62;
-  return [
-    parseFloat((Math.cos(theta) * r * scale).toFixed(3)),
-    parseFloat((y * scale).toFixed(3)),
-    parseFloat((Math.sin(theta) * r * scale).toFixed(3)),
-  ];
-}
-
-/* ── Store singleton ────────────────────── */
-let _data = null;
+/* ── Storage ────────────────────────────────── */
+let _d = null;
+const makeDefault = () => ({ workspaces:{}, subjects:{}, units:{}, nodes:{}, edges:{} });
 
 function load() {
-  if (_data) return;
-  try {
-    const raw = localStorage.getItem(KEY);
-    _data = raw ? JSON.parse(raw) : null;
-  } catch { _data = null; }
-
-  if (!_data || !_data.subjects) {
-    _data = makeDefault();
-  }
+  if (_d) return;
+  try { _d = JSON.parse(localStorage.getItem(KEY)); } catch { _d = null; }
+  if (!_d?.workspaces) _d = makeDefault();
 }
+function save() { localStorage.setItem(KEY, JSON.stringify(_d)); }
 
-function persist() {
-  localStorage.setItem(KEY, JSON.stringify(_data));
-}
-
-/* ════════════════════════════════════════════
-   PUBLIC API
-════════════════════════════════════════════ */
+/* ════════════════════════════════════════════ */
 const Store = {
 
-  // ── Subjects ────────────────────────────
-  getSubjects() {
+  /* ── Workspaces ─────────────────────── */
+  getWorkspaces() { load(); return Object.values(_d.workspaces); },
+  getWorkspace(id) { load(); return _d.workspaces[id]||null; },
+  addWorkspace({name, description='', color}) {
     load();
-    return Object.values(_data.subjects);
-  },
-
-  getSubject(id) {
-    load();
-    return _data.subjects[id] || null;
-  },
-
-  addSubject({ name, label, color }) {
-    load();
-    const existing = Object.keys(_data.subjects).length;
     const id = uuid();
-    _data.subjects[id] = {
-      id,
-      name,
-      label: label || name.slice(0, 4).toUpperCase(),
-      color: color || '#8B5CF6',
-      position: calcSubjectPosition(existing),
-      createdAt: Date.now(),
-    };
-    persist();
-    return _data.subjects[id];
+    _d.workspaces[id] = { id, name, description, color: color||COLORS[Object.keys(_d.workspaces).length%COLORS.length], createdAt: Date.now() };
+    save(); return _d.workspaces[id];
+  },
+  updateWorkspace(id, u) { load(); if(_d.workspaces[id]) { Object.assign(_d.workspaces[id],u); save(); } },
+  deleteWorkspace(id) {
+    load();
+    Object.values(_d.subjects).filter(s=>s.workspaceId===id).forEach(s=>this.deleteSubject(s.id,false));
+    delete _d.workspaces[id]; save();
   },
 
-  updateSubject(id, updates) {
+  /* ── Subjects ───────────────────────── */
+  getSubjects(workspaceId=null) { load(); const all=Object.values(_d.subjects); return workspaceId?all.filter(s=>s.workspaceId===workspaceId):all; },
+  getSubject(id) { load(); return _d.subjects[id]||null; },
+  addSubject({workspaceId, name, label, color}) {
     load();
-    if (!_data.subjects[id]) return null;
-    Object.assign(_data.subjects[id], updates);
-    persist();
-    return _data.subjects[id];
+    const idx = Object.values(_d.subjects).filter(s=>s.workspaceId===workspaceId).length;
+    const id  = uuid();
+    _d.subjects[id] = { id, workspaceId, name, label:label||name.slice(0,4).toUpperCase(), color:color||COLORS[idx%COLORS.length], position:calcSubjectPosition(idx), createdAt:Date.now() };
+    save(); return _d.subjects[id];
+  },
+  updateSubject(id,u) { load(); if(_d.subjects[id]){Object.assign(_d.subjects[id],u);save();} return _d.subjects[id]; },
+  deleteSubject(id, doPersist=true) {
+    load();
+    Object.values(_d.units).filter(u=>u.subjectId===id).forEach(u=>this.deleteUnit(u.id,false));
+    Object.values(_d.nodes).filter(n=>n.subjectId===id&&!n.unitId).forEach(n=>this.deleteNode(n.id,false));
+    delete _d.subjects[id];
+    if(doPersist) save();
   },
 
-  deleteSubject(id) {
+  /* ── Units (Sub-cubes) ──────────────── */
+  getUnits(subjectId=null) { load(); const all=Object.values(_d.units); return subjectId?all.filter(u=>u.subjectId===subjectId):all; },
+  getUnit(id) { load(); return _d.units[id]||null; },
+  addUnit({subjectId, name, color}) {
     load();
-    // Cascade: delete all nodes of this subject + edges involving those nodes
-    const nodeIds = Object.values(_data.nodes)
-      .filter(n => n.subjectId === id)
-      .map(n => n.id);
-    nodeIds.forEach(nid => this.deleteNode(nid, false));
-    delete _data.subjects[id];
-    persist();
-  },
-
-  // ── Nodes (Concept Nodes) ───────────────
-  getNodes(subjectId = null) {
-    load();
-    const all = Object.values(_data.nodes);
-    return subjectId ? all.filter(n => n.subjectId === subjectId) : all;
-  },
-
-  getNode(id) {
-    load();
-    return _data.nodes[id] || null;
-  },
-
-  addNode({ subjectId, label, unit = '', notes = '' }) {
-    load();
-    const existing = Object.values(_data.nodes).filter(n => n.subjectId === subjectId).length;
+    const idx = Object.values(_d.units).filter(u=>u.subjectId===subjectId).length;
+    const subj = _d.subjects[subjectId];
     const id = uuid();
-    _data.nodes[id] = {
-      id,
-      subjectId,
-      label,
-      unit,
-      notes,
-      position: calcNodePosition(existing),
-      whiteboardData: null,
-      createdAt: Date.now(),
-    };
-    persist();
-    return _data.nodes[id];
+    _d.units[id] = { id, subjectId, name, color:color||subj?.color||COLORS[idx%COLORS.length], position:calcUnitPosition(idx), createdAt:Date.now() };
+    save(); return _d.units[id];
   },
-
-  updateNode(id, updates) {
+  updateUnit(id,u) { load(); if(_d.units[id]){Object.assign(_d.units[id],u);save();} return _d.units[id]; },
+  deleteUnit(id, doPersist=true) {
     load();
-    if (!_data.nodes[id]) return null;
-    Object.assign(_data.nodes[id], updates);
-    persist();
-    return _data.nodes[id];
+    Object.values(_d.nodes).filter(n=>n.unitId===id).forEach(n=>this.deleteNode(n.id,false));
+    delete _d.units[id];
+    if(doPersist) save();
   },
 
-  deleteNode(id, doPersist = true) {
+  /* ── Nodes ──────────────────────────── */
+  getNodes({subjectId=null, unitId=null}={}) {
     load();
-    // Remove all edges touching this node
-    Object.keys(_data.edges).forEach(eid => {
-      const e = _data.edges[eid];
-      if (e.fromId === id || e.toId === id) delete _data.edges[eid];
-    });
-    delete _data.nodes[id];
-    if (doPersist) persist();
+    let all = Object.values(_d.nodes);
+    if (subjectId) all = all.filter(n=>n.subjectId===subjectId);
+    if (unitId !== undefined) all = all.filter(n=>n.unitId===unitId);
+    return all;
   },
-
-  // ── Edges (Concept Links) ───────────────
-  getEdges() {
+  getNode(id) { load(); return _d.nodes[id]||null; },
+  addNode({subjectId, unitId=null, label, notes=''}) {
     load();
-    return Object.values(_data.edges);
+    const idx = Object.values(_d.nodes).filter(n=>n.subjectId===subjectId&&n.unitId===unitId).length;
+    const id  = uuid();
+    _d.nodes[id] = { id, subjectId, unitId, label, notes, position:calcNodePosition(idx), whiteboardData:null, createdAt:Date.now() };
+    save(); return _d.nodes[id];
   },
-
-  getEdge(id) {
+  updateNode(id,u) { load(); if(_d.nodes[id]){Object.assign(_d.nodes[id],u);save();} return _d.nodes[id]; },
+  deleteNode(id, doPersist=true) {
     load();
-    return _data.edges[id] || null;
+    Object.keys(_d.edges).forEach(eid=>{ const e=_d.edges[eid]; if(e.fromId===id||e.toId===id) delete _d.edges[eid]; });
+    delete _d.nodes[id];
+    if(doPersist) save();
   },
 
-  getNodeEdges(nodeId) {
-    load();
-    return Object.values(_data.edges).filter(e => e.fromId === nodeId || e.toId === nodeId);
-  },
-
+  /* ── Edges ──────────────────────────── */
+  getEdges() { load(); return Object.values(_d.edges); },
+  getEdge(id) { load(); return _d.edges[id]||null; },
+  getNodeEdges(nodeId) { load(); return Object.values(_d.edges).filter(e=>e.fromId===nodeId||e.toId===nodeId); },
   getSubjectEdges(subjectId) {
     load();
-    const subjectNodeIds = new Set(
-      Object.values(_data.nodes).filter(n => n.subjectId === subjectId).map(n => n.id)
-    );
-    return Object.values(_data.edges).filter(
-      e => subjectNodeIds.has(e.fromId) || subjectNodeIds.has(e.toId)
-    );
+    const ids = new Set(Object.values(_d.nodes).filter(n=>n.subjectId===subjectId).map(n=>n.id));
+    return Object.values(_d.edges).filter(e=>ids.has(e.fromId)||ids.has(e.toId));
   },
-
-  addEdge({ fromId, toId, relationship = 'relates to' }) {
+  getUnitEdges(unitId) {
     load();
+    const ids = new Set(Object.values(_d.nodes).filter(n=>n.unitId===unitId).map(n=>n.id));
+    return Object.values(_d.edges).filter(e=>ids.has(e.fromId)||ids.has(e.toId));
+  },
+  addEdge({fromId, toId, relationship='relates to'}) {
+    load();
+    const fn = _d.nodes[fromId], tn = _d.nodes[toId];
+    const isCross = fn&&tn&&fn.subjectId!==tn.subjectId;
     const id = uuid();
-    const fromNode = _data.nodes[fromId];
-    const toNode   = _data.nodes[toId];
-    const isCross  = fromNode && toNode && fromNode.subjectId !== toNode.subjectId;
-    _data.edges[id] = {
-      id, fromId, toId, relationship, isCross,
-      notes: '',
-      whiteboardData: null,
-      createdAt: Date.now(),
-    };
-    persist();
-    return _data.edges[id];
+    _d.edges[id] = { id, fromId, toId, relationship, isCross:!!isCross, notes:'', whiteboardData:null, createdAt:Date.now() };
+    save(); return _d.edges[id];
   },
+  updateEdge(id,u) { load(); if(_d.edges[id]){Object.assign(_d.edges[id],u);save();} return _d.edges[id]; },
+  deleteEdge(id) { load(); delete _d.edges[id]; save(); },
 
-  updateEdge(id, updates) {
-    load();
-    if (!_data.edges[id]) return null;
-    Object.assign(_data.edges[id], updates);
-    persist();
-    return _data.edges[id];
-  },
-
-  deleteEdge(id) {
-    load();
-    delete _data.edges[id];
-    persist();
-  },
-
-  // ── Utilities ───────────────────────────
-  getCrossLinks() {
-    load();
-    return Object.values(_data.edges).filter(e => e.isCross);
-  },
-
+  /* ── Utilities ──────────────────────── */
   getSubjectPairs() {
-    // Returns unique pairs of subjects that share cross-links
-    const pairs = new Set();
-    this.getCrossLinks().forEach(e => {
-      const a = _data.nodes[e.fromId]?.subjectId;
-      const b = _data.nodes[e.toId]?.subjectId;
-      if (a && b && a !== b) {
-        pairs.add([a, b].sort().join('::'));
-      }
-    });
-    return [...pairs].map(p => p.split('::'));
-  },
-
-  // Seed GATE subjects if store is completely empty
-  seedIfEmpty() {
     load();
-    if (Object.keys(_data.subjects).length === 0) {
-      GATE_SUBJECTS_SEED.forEach(s => this.addSubject(s));
-    }
+    const pairs = new Set();
+    Object.values(_d.edges).filter(e=>e.isCross).forEach(e=>{
+      const a=_d.nodes[e.fromId]?.subjectId, b=_d.nodes[e.toId]?.subjectId;
+      if(a&&b&&a!==b) pairs.add([a,b].sort().join('::'));
+    });
+    return [...pairs].map(p=>p.split('::'));
   },
-
-  // Full reset (dev only)
-  reset() {
-    _data = makeDefault();
-    persist();
+  getAllNodesGrouped() {
+    load();
+    const groups = {};
+    Object.values(_d.subjects).forEach(s=>{ groups[s.id]={subject:s,nodes:[]}; });
+    Object.values(_d.nodes).forEach(n=>{ if(groups[n.subjectId]) groups[n.subjectId].nodes.push(n); });
+    return Object.values(groups);
   },
+  getWorkspaceSubjectCount(wid) {
+    load();
+    return Object.values(_d.subjects).filter(s=>s.workspaceId===wid).length;
+  },
+  reset() { _d = makeDefault(); save(); },
 };
-
 export default Store;

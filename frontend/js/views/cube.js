@@ -1,345 +1,279 @@
-// cube.js — Three.js cube interior view
+// cube.js v2 — Sub-cubes (units), fixed node positioning, cross-cube linking, context menu
 import * as THREE from 'three';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import Store from '../core/store.js';
 import Router from '../core/router.js';
 import Events from '../core/events.js';
+import { openAddNodeModal, openAddUnitModal, openEditNodeModal, openConfirmModal, openCrossLinkModal } from '../ui/modal.js';
 
 let scene, camera, renderer, labelRenderer, controls;
-let animId = null;
+let animId=null, nodeMeshes=[], unitMeshes=[], edgeMidMeshes=[];
+let linkMode=false, linkFirst=null;
+const CH=1.0; // cube half
 
-let nodeMeshes  = [];   // { mesh, nodeId }
-let edgeMidMeshes = []; // { mesh, edgeId }
-
-// Link mode state
-let linkMode  = false;
-let linkFirst = null;   // nodeId of first selected node
-
-const CUBE_HALF = 1.0;
-const NODE_R    = 0.10;
-const GHOST_R   = 0.07;
-
-/* ════════════════════════════════════════════
-   INIT / DESTROY
-════════════════════════════════════════════ */
 export function initCube(container, subjectId) {
-  clearScene();
-  if (scene) { destroyCube(); }
+  if(renderer) destroyCube();
+  container.innerHTML='';
+  _buildScene(container, subjectId);
+}
 
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x09090B);
-  scene.fog = new THREE.FogExp2(0x09090B, 0.06);
+function _buildScene(container, subjectId) {
+  scene=new THREE.Scene(); scene.background=new THREE.Color(0xF0F1F3);
+  scene.fog=new THREE.FogExp2(0xF2F2F4,0.04);
 
-  // Stars (subtle background)
-  const sg = new THREE.BufferGeometry();
-  const sp = new Float32Array(3000).map(() => (Math.random() - 0.5) * 50);
-  sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
-  scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 0.05, transparent: true, opacity: 0.3 })));
+  scene.add(new THREE.AmbientLight(0xffffff,0.9));
+  const dl=new THREE.DirectionalLight(0xffffff,0.5); dl.position.set(5,8,5); scene.add(dl);
+  const dl2=new THREE.DirectionalLight(0xaaaaff,0.25); dl2.position.set(-5,-4,-8); scene.add(dl2);
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  const d = new THREE.DirectionalLight(0xffffff, 0.5);
-  d.position.set(5, 8, 5);
-  scene.add(d);
+  const W=container.clientWidth||window.innerWidth, H=container.clientHeight||(window.innerHeight-52);
+  camera=new THREE.PerspectiveCamera(55,W/H,0.01,100); camera.position.set(0,0.5,3.5);
 
-  const W = container.clientWidth, H = container.clientHeight;
-  camera = new THREE.PerspectiveCamera(55, W / H, 0.01, 100);
-  camera.position.set(0, 0.5, 3.2);
-
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(W, H);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setSize(W,H); renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
   container.appendChild(renderer.domElement);
 
-  labelRenderer = new CSS2DRenderer();
-  labelRenderer.setSize(W, H);
-  labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  labelRenderer=new CSS2DRenderer(); labelRenderer.setSize(W,H);
+  labelRenderer.domElement.style.cssText='position:absolute;top:0;left:0;pointer-events:none;';
   container.appendChild(labelRenderer.domElement);
 
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.07;
-  controls.minDistance   = 1.2;
-  controls.maxDistance   = 6;
+  controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=0.07; controls.minDistance=1.2; controls.maxDistance=7;
 
-  buildCubeScene(subjectId);
+  _populateScene(subjectId);
 
-  renderer.domElement.addEventListener('click', e => onCubeClick(e, subjectId));
-  window.addEventListener('resize', () => onCubeResize(container));
-  Events.on('nodes:changed', () => rebuildCubeScene(subjectId));
-
+  renderer.domElement.addEventListener('click', e=>onCubeClick(e,subjectId));
+  renderer.domElement.addEventListener('contextmenu', e=>onCubeCtx(e,subjectId));
+  window.addEventListener('resize',()=>onCubeResize(container));
+  Events.on('nodes:changed',()=>rebuildCubeScene(subjectId));
   startCubeLoop();
 }
 
-export function destroyCube() {
-  stopCubeLoop();
-  Events.off('nodes:changed', () => {});
-  linkMode  = false;
-  linkFirst = null;
-  nodeMeshes = [];
-  edgeMidMeshes = [];
-}
+function _populateScene(subjectId) {
+  nodeMeshes=[]; unitMeshes=[]; edgeMidMeshes=[];
+  const subj = Store.getSubject(subjectId);
+  if(!subj) return;
+  const color = new THREE.Color(subj.color||'#7C3AED');
 
-function clearScene() {
-  nodeMeshes = [];
-  edgeMidMeshes = [];
-}
+  // Outer cube shell (shaded faces)
+  const faceGeo=new THREE.BoxGeometry(CH*2,CH*2,CH*2);
+  const fOps=[0.14,0.08,0.20,0.05,0.16,0.10];
+  const fMats=fOps.map(o=>new THREE.MeshLambertMaterial({color,transparent:true,opacity:o,side:THREE.FrontSide}));
+  scene.add(new THREE.Mesh(faceGeo,fMats));
 
-/* ════════════════════════════════════════════
-   SCENE BUILDER
-════════════════════════════════════════════ */
-function buildCubeScene(subjectId) {
-  const subject = Store.getSubject(subjectId);
-  if (!subject) return;
-
-  // ── Wireframe cube ────────────────────────
-  const geo   = new THREE.BoxGeometry(CUBE_HALF*2, CUBE_HALF*2, CUBE_HALF*2);
-  const edges = new THREE.EdgesGeometry(geo);
-  const color = new THREE.Color(subject.color || '#8B5CF6');
-  scene.add(new THREE.LineSegments(edges,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.25 })
+  // Wireframe outer shell
+  scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CH*2,CH*2,CH*2)),
+    new THREE.LineBasicMaterial({color,transparent:true,opacity:0.4})
   ));
 
-  // ── Grid planes (subtle reference) ────────
-  const gridMat = new THREE.LineBasicMaterial({ color: 0x27272A, transparent: true, opacity: 0.4 });
-  [-CUBE_HALF, 0, CUBE_HALF].forEach(yOff => {
-    const g = new THREE.PlaneGeometry(CUBE_HALF*2, CUBE_HALF*2, 4, 4);
-    const e2 = new THREE.EdgesGeometry(g);
-    const l  = new THREE.LineSegments(e2, gridMat);
-    l.rotation.x = Math.PI / 2;
-    l.position.y = yOff;
-    scene.add(l);
-  });
+  // Grid floor
+  const grid=new THREE.GridHelper(CH*2,8,0xCCCCCC,0xDDDDDD);
+  grid.position.y=-CH; scene.add(grid);
 
-  const nodes = Store.getNodes(subjectId);
-  const edges2 = Store.getSubjectEdges(subjectId);
+  // Unit sub-cubes
+  Store.getUnits(subjectId).forEach(u=>addUnitMesh(u));
 
-  // ── Nodes ─────────────────────────────────
-  nodes.forEach(node => addNodeMesh(node, subject.color));
+  // Direct nodes (not in any unit)
+  Store.getNodes({subjectId, unitId:null}).forEach(n=>addNodeMesh(n,subj.color));
 
-  // ── Ghost nodes (cross-subject) ───────────
-  const crossEdges = edges2.filter(e => e.isCross);
-  const ghostIds   = new Set();
-  crossEdges.forEach(e => {
-    const gId = Store.getNode(e.fromId)?.subjectId === subjectId ? e.toId : e.fromId;
-    ghostIds.add(gId);
-  });
-  ghostIds.forEach(gId => {
-    const gNode = Store.getNode(gId);
-    const gSubj = Store.getSubject(gNode?.subjectId);
-    if (!gNode || !gSubj) return;
-    addGhostMesh(gNode, gSubj.color, gSubj.label);
-  });
-
-  // ── Edge lines ─────────────────────────────
-  edges2.forEach(edge => addEdgeLine(edge, subject));
+  // Ghost nodes + edge lines
+  Store.getSubjectEdges(subjectId).forEach(e=>drawEdgeLine(e,subj,true));
 }
 
-function rebuildCubeScene(subjectId) {
-  // Clear meshes
-  nodeMeshes = [];
-  edgeMidMeshes = [];
-  scene.clear();
-  buildCubeScene(subjectId);
+/* ── Unit sub-cube ─────────────────────────── */
+function addUnitMesh(unit) {
+  const [x,y,z]=unit.position||[0,0,0];
+  const color=new THREE.Color(unit.color||'#7C3AED');
+  const US=0.36; // unit sub-cube size
+
+  const group=new THREE.Group(); group.position.set(x,y,z);
+
+  // Shaded faces
+  const fGeo=new THREE.BoxGeometry(US,US,US);
+  const fMats=[0.22,0.14,0.30,0.10,0.25,0.18].map(o=>new THREE.MeshLambertMaterial({color,transparent:true,opacity:o}));
+  group.add(new THREE.Mesh(fGeo,fMats));
+
+  // Wireframe
+  const wMat=new THREE.LineBasicMaterial({color,linewidth:1.5});
+  group.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(US,US,US)),wMat));
+
+  // Hit mesh
+  const hitMesh=new THREE.Mesh(new THREE.BoxGeometry(US*1.2,US*1.2,US*1.2),new THREE.MeshBasicMaterial({visible:false}));
+  hitMesh.userData={unitId:unit.id, wMat, origColor:color.clone()};
+  group.add(hitMesh); unitMeshes.push({mesh:hitMesh,unitId:unit.id});
+
+  // Node count badge
+  const nodeCount=Store.getNodes({subjectId:unit.subjectId,unitId:unit.id}).length;
+  const div=document.createElement('div'); div.className='unit-label';
+  div.innerHTML=`<div class="unit-label-inner" style="color:${unit.color}">${unit.name}<span style="opacity:0.6;font-size:9px;margin-left:3px">(${nodeCount})</span></div>`;
+  const lbl=new CSS2DObject(div); lbl.position.set(0,US*0.85,0); group.add(lbl);
+
+  scene.add(group);
 }
 
-/* ── Node mesh ──────────────────────────── */
-function addNodeMesh(node, subjectColor) {
-  const [x, y, z] = node.position || [0, 0, 0];
-  const color = new THREE.Color(subjectColor || '#8B5CF6');
+/* ── Node sphere ───────────────────────────── */
+function addNodeMesh(node,subjectColor) {
+  const [x,y,z]=node.position||[0,0,0];
+  const color=new THREE.Color(subjectColor||'#7C3AED');
+  const geo=new THREE.SphereGeometry(0.09,20,20);
+  const mat=new THREE.MeshStandardMaterial({color,emissive:color,emissiveIntensity:0.2,roughness:0.4,metalness:0.05});
+  const mesh=new THREE.Mesh(geo,mat); mesh.position.set(x,y,z);
+  mesh.userData={nodeId:node.id};
 
-  const geo  = new THREE.SphereGeometry(NODE_R, 20, 20);
-  const mat  = new THREE.MeshStandardMaterial({
-    color, emissive: color, emissiveIntensity: 0.35,
-    roughness: 0.3, metalness: 0.1,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(x, y, z);
-  mesh.userData = { nodeId: node.id };
-  scene.add(mesh);
-  nodeMeshes.push({ mesh, nodeId: node.id });
-
-  // Glow ring
-  const ringGeo = new THREE.TorusGeometry(NODE_R * 1.6, 0.008, 8, 32);
-  const ringMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4 });
-  const ring    = new THREE.Mesh(ringGeo, ringMat);
-  ring.rotation.x = Math.PI / 2;
-  mesh.add(ring);
+  // Orbit ring
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(0.145,0.007,8,32),new THREE.MeshBasicMaterial({color,transparent:true,opacity:0.4}));
+  ring.rotation.x=Math.PI/2; mesh.add(ring);
 
   // Label
-  const div = document.createElement('div');
-  div.className = 'node-label';
-  div.innerHTML = `<div class="node-label-inner">${node.label}</div>`;
-  const label = new CSS2DObject(div);
-  label.position.set(0, NODE_R * 2.2, 0);
-  mesh.add(label);
+  const div=document.createElement('div'); div.className='node-label';
+  div.innerHTML=`<div class="node-label-inner">${node.label}</div>`;
+  const lbl=new CSS2DObject(div); lbl.position.set(0,0.22,0); mesh.add(lbl);
+
+  scene.add(mesh); nodeMeshes.push({mesh,nodeId:node.id});
 }
 
-/* ── Ghost mesh (cross-subject node) ────── */
-function addGhostMesh(node, color, subjectLabel) {
-  const [x, y, z] = node.position || [0, 0, 0];
-  // Place ghost at edge of cube
-  const pos = clampToSurface(x, y, z);
+/* ── Ghost + Edge ──────────────────────────── */
+function drawEdgeLine(edge,currentSubject,addGhosts) {
+  const fn=Store.getNode(edge.fromId), tn=Store.getNode(edge.toId);
+  if(!fn||!tn) return;
+  const sIds=new Set(Store.getNodes({subjectId:currentSubject.id}).map(n=>n.id));
+  if(!sIds.has(edge.fromId)&&!sIds.has(edge.toId)) return;
 
-  const geo  = new THREE.SphereGeometry(GHOST_R, 12, 12);
-  const mat  = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(color), transparent: true, opacity: 0.35,
-    wireframe: true,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(pos.x, pos.y, pos.z);
-  scene.add(mesh);
+  const fPos=fn.position||[0,0,0];
+  let   tPos=tn.position||[0,0,0];
 
-  const div = document.createElement('div');
-  div.className = 'node-label';
-  div.innerHTML = `<div class="node-label-inner" style="opacity:0.5;font-style:italic">${subjectLabel}:${node.label}</div>`;
-  const label = new CSS2DObject(div);
-  label.position.set(0, GHOST_R * 2.5, 0);
-  mesh.add(label);
-}
-
-/* ── Edge line ─────────────────────────── */
-function addEdgeLine(edge, currentSubject) {
-  const fromNode = Store.getNode(edge.fromId);
-  const toNode   = Store.getNode(edge.toId);
-  if (!fromNode || !toNode) return;
-
-  const fromPos = fromNode.position || [0, 0, 0];
-  let   toPos   = toNode.position   || [0, 0, 0];
-
-  // If cross-subject, clamp toPos to cube surface
-  if (edge.isCross) {
-    const clamped = clampToSurface(...toPos);
-    toPos = [clamped.x, clamped.y, clamped.z];
+  if(edge.isCross) {
+    const clamped=clampSurface(...tPos); tPos=[clamped.x,clamped.y,clamped.z];
+    if(addGhosts) {
+      const gs=Store.getSubject(tn.subjectId);
+      addGhostNode(tn, gs?.color||'#999', gs?.label||'?', clamped);
+    }
   }
 
-  const points = [
-    new THREE.Vector3(...fromPos),
-    new THREE.Vector3(...toPos),
-  ];
-  const geo = new THREE.BufferGeometry().setFromPoints(points);
-  const mat = edge.isCross
-    ? new THREE.LineDashedMaterial({ color: 0xF59E0B, dashSize: 0.08, gapSize: 0.04, transparent: true, opacity: 0.7 })
-    : new THREE.LineBasicMaterial({ color: new THREE.Color(currentSubject.color), transparent: true, opacity: 0.6 });
-  const line = new THREE.Line(geo, mat);
-  if (edge.isCross) line.computeLineDistances();
-  scene.add(line);
+  const pts=[new THREE.Vector3(...fPos),new THREE.Vector3(...tPos)];
+  const mat=edge.isCross
+    ? new THREE.LineDashedMaterial({color:0xD97706,dashSize:0.07,gapSize:0.04,transparent:true,opacity:0.65})
+    : new THREE.LineBasicMaterial({color:new THREE.Color(currentSubject.color),transparent:true,opacity:0.55});
+  const ln=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),mat);
+  if(edge.isCross) ln.computeLineDistances();
+  scene.add(ln);
 
-  // Invisible midpoint sphere for click detection
-  const mid = new THREE.Vector3(
-    (fromPos[0] + toPos[0]) / 2,
-    (fromPos[1] + toPos[1]) / 2,
-    (fromPos[2] + toPos[2]) / 2,
+  // Midpoint click sphere
+  const mid=new THREE.Vector3((fPos[0]+tPos[0])/2,(fPos[1]+tPos[1])/2,(fPos[2]+tPos[2])/2);
+  const midM=new THREE.Mesh(new THREE.SphereGeometry(0.055,8,8),new THREE.MeshBasicMaterial({visible:false}));
+  midM.position.copy(mid); midM.userData={edgeId:edge.id};
+  scene.add(midM); edgeMidMeshes.push({mesh:midM,edgeId:edge.id});
+}
+
+function addGhostNode(node,color,subjectLabel,pos) {
+  const mesh=new THREE.Mesh(
+    new THREE.SphereGeometry(0.065,12,12),
+    new THREE.MeshStandardMaterial({color:new THREE.Color(color),transparent:true,opacity:0.3,wireframe:true})
   );
-  const midGeo  = new THREE.SphereGeometry(0.06, 8, 8);
-  const midMat  = new THREE.MeshBasicMaterial({ visible: false });
-  const midMesh = new THREE.Mesh(midGeo, midMat);
-  midMesh.position.copy(mid);
-  midMesh.userData = { edgeId: edge.id };
-  scene.add(midMesh);
-  edgeMidMeshes.push({ mesh: midMesh, edgeId: edge.id });
+  mesh.position.set(pos.x,pos.y,pos.z);
+  const div=document.createElement('div'); div.className='node-label';
+  div.innerHTML=`<div class="node-label-inner" style="opacity:0.5;font-style:italic">${subjectLabel}</div>`;
+  const lbl=new CSS2DObject(div); lbl.position.set(0,0.2,0); mesh.add(lbl);
+  scene.add(mesh);
 }
 
-/* ── Helper: clamp to cube surface ──────── */
-function clampToSurface(x, y, z) {
-  const S = CUBE_HALF * 0.95;
-  return {
-    x: Math.max(-S, Math.min(S, x)),
-    y: Math.max(-S, Math.min(S, y)),
-    z: Math.max(-S, Math.min(S, z)),
-  };
-}
+function clampSurface(x,y,z,s=CH*0.93){ return {x:Math.max(-s,Math.min(s,x)),y:Math.max(-s,Math.min(s,y)),z:Math.max(-s,Math.min(s,z))}; }
 
-/* ════════════════════════════════════════════
-   CLICK HANDLING
-════════════════════════════════════════════ */
-const raycaster = new THREE.Raycaster();
-const mouse     = new THREE.Vector2();
+/* ── Click ─────────────────────────────────── */
+const raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
 
 function onCubeClick(e, subjectId) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-  mouse.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  const r=renderer.domElement.getBoundingClientRect();
+  mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const allMeshes=[...nodeMeshes.map(n=>n.mesh),...unitMeshes.map(u=>u.mesh),...edgeMidMeshes.map(m=>m.mesh)];
+  const hits=raycaster.intersectObjects(allMeshes);
+  if(!hits.length) return;
+  const obj=hits[0].object;
 
-  raycaster.setFromCamera(mouse, camera);
-  const allMeshes = [...nodeMeshes.map(n => n.mesh), ...edgeMidMeshes.map(m => m.mesh)];
-  const hits = raycaster.intersectObjects(allMeshes);
-
-  if (hits.length === 0) return;
-  const obj = hits[0].object;
-
-  // ── Link mode ─────────────────────────────
-  if (linkMode) {
-    const nm = nodeMeshes.find(n => n.mesh === obj);
-    if (!nm) return;
-
-    if (!linkFirst) {
-      linkFirst = nm.nodeId;
-      obj.material.emissiveIntensity = 1.0;
-      Events.emit('linkmode:first', { nodeId: nm.nodeId });
-    } else {
-      if (nm.nodeId !== linkFirst) {
-        Events.emit('linkmode:second', { fromId: linkFirst, toId: nm.nodeId, subjectId });
-      }
-      exitLinkMode();
-    }
+  // Link mode
+  if(linkMode) {
+    const nm=nodeMeshes.find(n=>n.mesh===obj);
+    if(!nm) return;
+    if(!linkFirst) { linkFirst=nm.nodeId; obj.material.emissiveIntensity=0.9; Events.emit('linkmode:first',{nodeId:nm.nodeId}); }
+    else if(nm.nodeId!==linkFirst) { Events.emit('linkmode:second',{fromId:linkFirst,toId:nm.nodeId,subjectId}); exitLinkMode(); }
     return;
   }
 
-  // ── Normal click — node ───────────────────
-  const nm = nodeMeshes.find(n => n.mesh === obj);
-  if (nm) { Router.goNodeWb(nm.nodeId); return; }
-
-  // ── Normal click — edge midpoint ──────────
-  const em = edgeMidMeshes.find(m => m.mesh === obj);
-  if (em) { Router.goEdgeWb(em.edgeId); }
+  // Normal
+  const nm=nodeMeshes.find(n=>n.mesh===obj);
+  if(nm) { Router.goNodeWb(nm.nodeId); return; }
+  const um=unitMeshes.find(u=>u.mesh===obj);
+  if(um) { Router.goSubcube(um.unitId); return; }
+  const em=edgeMidMeshes.find(m=>m.mesh===obj);
+  if(em) { Router.goEdgeWb(em.edgeId); }
 }
 
-/* ════════════════════════════════════════════
-   LINK MODE
-════════════════════════════════════════════ */
-export function enterLinkMode() {
-  linkMode  = true;
-  linkFirst = null;
-  Events.emit('linkmode:enter');
-}
+function onCubeCtx(e, subjectId) {
+  e.preventDefault();
+  const r=renderer.domElement.getBoundingClientRect();
+  mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const hits=raycaster.intersectObjects([...nodeMeshes.map(n=>n.mesh),...unitMeshes.map(u=>u.mesh)]);
+  const obj=hits.length>0?hits[0].object:null;
+  const nm=obj?nodeMeshes.find(n=>n.mesh===obj):null;
+  const um=obj?unitMeshes.find(u=>u.mesh===obj):null;
 
-export function exitLinkMode() {
-  linkMode  = false;
-  linkFirst = null;
-  Events.emit('linkmode:exit');
-}
-
-/* ════════════════════════════════════════════
-   LOOP + RESIZE
-════════════════════════════════════════════ */
-function startCubeLoop() {
-  if (animId !== null) return;
-  function tick() {
-    animId = requestAnimationFrame(tick);
-    controls.update();
-    renderer.render(scene, camera);
-    labelRenderer.render(scene, camera);
+  let items;
+  if(nm) {
+    const node=Store.getNode(nm.nodeId);
+    items=[
+      {icon:'📄',label:'Open Whiteboard',action:()=>Router.goNodeWb(nm.nodeId)},
+      {icon:'✏️',label:'Edit Node',action:()=>openEditNodeModal(nm.nodeId)},
+      {sep:true},
+      {icon:'🗑️',label:'Delete Node',danger:true,action:()=>openConfirmModal({
+        title:'Delete Node',confirmText:'Delete',
+        message:`Delete "<b>${node?.label}</b>"? All connections will be removed.`,
+        onConfirm:()=>{ Store.deleteNode(nm.nodeId); Events.emit('nodes:changed',{subjectId}); Events.emit('subjects:changed'); }
+      })},
+    ];
+  } else if(um) {
+    const unit=Store.getUnit(um.unitId);
+    items=[
+      {icon:'📦',label:'Open Unit',action:()=>Router.goSubcube(um.unitId)},
+      {icon:'✏️',label:'Edit Unit',action:()=>openEditUnitModal(um.unitId)},
+      {sep:true},
+      {icon:'🗑️',label:'Delete Unit',danger:true,action:()=>openConfirmModal({
+        title:'Delete Unit',confirmText:'Delete',
+        message:`Delete unit "<b>${unit?.name}</b>"? All nodes inside will be removed.`,
+        onConfirm:()=>{ Store.deleteUnit(um.unitId); Events.emit('nodes:changed',{subjectId}); }
+      })},
+    ];
+  } else {
+    items=[
+      {icon:'➕',label:'Add Concept Node',action:()=>openAddNodeModal({subjectId,unitId:null})},
+      {icon:'📦',label:'Add Unit (Sub-Cube)',action:()=>openAddUnitModal(subjectId)},
+      {sep:true},
+      {icon:'🔗',label:'Cross-Subject Link',action:()=>openCrossLinkModal(subjectId)},
+    ];
   }
+  showCtxMenu(e.clientX,e.clientY,items);
+}
+
+/* ── Link mode ─────────────────────────────── */
+export function enterLinkMode() { linkMode=true; linkFirst=null; Events.emit('linkmode:enter'); }
+export function exitLinkMode()  { linkMode=false; linkFirst=null; Events.emit('linkmode:exit'); }
+export function resetCubeCamera() { camera?.position.set(0,0.5,3.5); controls?.reset(); }
+
+/* ── Loop ──────────────────────────────────── */
+function startCubeLoop() {
+  if(animId!==null) return;
+  function tick(){ animId=requestAnimationFrame(tick); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); }
   tick();
 }
+function stopCubeLoop() { if(animId!==null) cancelAnimationFrame(animId); animId=null; }
+function onCubeResize(c) { const W=c.clientWidth,H=c.clientHeight; camera.aspect=W/H; camera.updateProjectionMatrix(); renderer.setSize(W,H); labelRenderer.setSize(W,H); }
 
-function stopCubeLoop() {
-  if (animId !== null) cancelAnimationFrame(animId);
-  animId = null;
+export function destroyCube() { stopCubeLoop(); Events.off('nodes:changed',()=>{}); }
+export function rebuildCubeScene(sid) { nodeMeshes=[]; unitMeshes=[]; edgeMidMeshes=[]; while(scene.children.length) scene.remove(scene.children[0]); _populateScene(sid); }
+
+/* ── Ctx helper ─────────────────────────────── */
+function showCtxMenu(x,y,items) {
+  const el=document.getElementById('ctxMenu');
+  el.innerHTML=items.map((it,i)=>it.sep?`<div class="ctx-sep"></div>`:`<div class="ctx-item${it.danger?' danger':''}" data-i="${i}">${it.icon||''} ${it.label}</div>`).join('');
+  el.style.display='block'; el.style.left=`${Math.min(x,window.innerWidth-190)}px`; el.style.top=`${Math.min(y,window.innerHeight-140)}px`;
+  el.querySelectorAll('.ctx-item').forEach(el2=>{ const i=+el2.dataset.i; if(!isNaN(i)&&items[i]) el2.addEventListener('click',()=>{items[i].action?.(); el.style.display='none';}); });
 }
-
-function onCubeResize(container) {
-  const W = container.clientWidth, H = container.clientHeight;
-  camera.aspect = W / H;
-  camera.updateProjectionMatrix();
-  renderer.setSize(W, H);
-  labelRenderer.setSize(W, H);
-}
-
-export function resetCubeCamera() {
-  camera?.position.set(0, 0.5, 3.2);
-  controls?.reset();
-}
-
-export { rebuildCubeScene };

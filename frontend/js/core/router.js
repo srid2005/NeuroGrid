@@ -1,101 +1,108 @@
-// router.js — Screen navigation and breadcrumb management
+// router.js v2 — 6 screens: home, galaxy, cube, subcube, nodeWb, edgeWb
 import Events from './events.js';
 
-const SCREENS = {
-  galaxy:   'screen-galaxy',
-  cube:     'screen-cube',
-  nodeWb:   'screen-node-wb',
-  edgeWb:   'screen-edge-wb',
-};
+const SCREENS = { home:'screen-home', galaxy:'screen-galaxy', cube:'screen-cube',
+                  subcube:'screen-subcube', nodeWb:'screen-node-wb', edgeWb:'screen-edge-wb' };
 
 let _current = null;
-let _context = {};  // { subjectId, nodeId, edgeId }
+let _ctx = {};
 
-/* ── Breadcrumb ─────────────────────────── */
 function setBreadcrumb(items) {
   const bc = document.getElementById('breadcrumb');
-  bc.innerHTML = items.map((item, i) => {
-    const isLast = i === items.length - 1;
-    let html = '';
-    if (i > 0) html += '<span class="bc-sep">›</span>';
-    html += `<span class="bc-item${isLast ? ' active' : ''}" data-nav="${item.nav || ''}" data-id="${item.id || ''}">${item.label}</span>`;
-    return html;
+  bc.innerHTML = items.map((it,i)=>{
+    const last = i===items.length-1;
+    let h = i>0?'<span class="bc-sep">›</span>':'';
+    h += `<span class="bc-item${last?' active':''}" data-nav="${it.nav||''}" data-id="${it.id||''}">${it.label}</span>`;
+    return h;
   }).join('');
-
-  // Breadcrumb click navigation
-  bc.querySelectorAll('.bc-item[data-nav]').forEach(el => {
-    const nav = el.dataset.nav;
-    const id  = el.dataset.id;
-    if (!nav || el.classList.contains('active')) return;
-    el.addEventListener('click', () => {
-      if (nav === 'galaxy')  Router.goGalaxy();
-      if (nav === 'cube')    Router.goCube(id);
+  bc.querySelectorAll('.bc-item[data-nav]').forEach(el=>{
+    if(!el.dataset.nav||el.classList.contains('active')) return;
+    el.addEventListener('click',()=>{
+      const n=el.dataset.nav, id=el.dataset.id;
+      if(n==='home')    Router.goHome();
+      if(n==='galaxy')  Router.goGalaxy(id);
+      if(n==='cube')    Router.goCube(id);
+      if(n==='subcube') Router.goSubcube(id);
     });
   });
 }
 
-/* ── Core show/hide ─────────────────────── */
-function show(screenKey) {
-  Object.values(SCREENS).forEach(id => {
-    document.getElementById(id)?.classList.remove('active');
-  });
-  const id = SCREENS[screenKey];
-  if (id) document.getElementById(id)?.classList.add('active');
-  const prev = _current;
-  _current = screenKey;
-  Events.emit('screen:change', { to: screenKey, from: prev, context: _context });
+function show(key) {
+  Object.values(SCREENS).forEach(id=>document.getElementById(id)?.classList.remove('active'));
+  document.getElementById(SCREENS[key])?.classList.add('active');
+  const prev = _current; _current = key;
+  Events.emit('screen:change',{to:key,from:prev,context:_ctx});
 }
 
-/* ════════════════════════════════════════════
-   PUBLIC ROUTER
-════════════════════════════════════════════ */
 const Router = {
   get current() { return _current; },
-  get context() { return _context; },
+  get context() { return _ctx; },
 
-  goGalaxy() {
-    _context = {};
-    setBreadcrumb([{ label: 'Galaxy' }]);
+  goHome() {
+    _ctx = {};
+    setBreadcrumb([{label:'Home'}]);
+    show('home');
+  },
+  goGalaxy(workspaceId) {
+    const S=window.__store;
+    const ws = S?.getWorkspace(workspaceId);
+    _ctx = {workspaceId};
+    setBreadcrumb([{label:'Home',nav:'home'},{label:ws?.name||'Workspace'}]);
     show('galaxy');
   },
-
   goCube(subjectId) {
-    const Store = window.__store;
-    const subject = Store?.getSubject(subjectId);
-    _context = { subjectId };
+    const S=window.__store;
+    const subj = S?.getSubject(subjectId);
+    const ws   = S?.getWorkspace(subj?.workspaceId);
+    _ctx = {workspaceId:subj?.workspaceId, subjectId};
     setBreadcrumb([
-      { label: 'Galaxy', nav: 'galaxy' },
-      { label: subject?.name || 'Subject' },
+      {label:'Home',nav:'home'},
+      {label:ws?.name||'Workspace',nav:'galaxy',id:subj?.workspaceId},
+      {label:subj?.name||'Subject'},
     ]);
     show('cube');
   },
-
-  goNodeWb(nodeId) {
-    const Store = window.__store;
-    const node    = Store?.getNode(nodeId);
-    const subject = Store?.getSubject(node?.subjectId);
-    _context = { subjectId: node?.subjectId, nodeId };
+  goSubcube(unitId) {
+    const S=window.__store;
+    const unit  = S?.getUnit(unitId);
+    const subj  = S?.getSubject(unit?.subjectId);
+    const ws    = S?.getWorkspace(subj?.workspaceId);
+    _ctx = {workspaceId:subj?.workspaceId, subjectId:unit?.subjectId, unitId};
     setBreadcrumb([
-      { label: 'Galaxy', nav: 'galaxy' },
-      { label: subject?.name || 'Subject', nav: 'cube', id: node?.subjectId },
-      { label: node?.label || 'Node' },
+      {label:'Home',nav:'home'},
+      {label:ws?.name||'Workspace',nav:'galaxy',id:subj?.workspaceId},
+      {label:subj?.name||'Subject',nav:'cube',id:unit?.subjectId},
+      {label:unit?.name||'Unit'},
     ]);
+    show('subcube');
+  },
+  goNodeWb(nodeId) {
+    const S=window.__store;
+    const node = S?.getNode(nodeId);
+    const subj = S?.getSubject(node?.subjectId);
+    const unit = node?.unitId ? S?.getUnit(node.unitId) : null;
+    _ctx = {workspaceId:subj?.workspaceId, subjectId:node?.subjectId, unitId:node?.unitId||null, nodeId};
+    const crumbs = [
+      {label:'Home',nav:'home'},
+      {label:subj?.name||'Subject',nav:'cube',id:node?.subjectId},
+    ];
+    if (unit) crumbs.push({label:unit.name,nav:'subcube',id:unit.id});
+    crumbs.push({label:node?.label||'Node'});
+    setBreadcrumb(crumbs);
     show('nodeWb');
   },
-
   goEdgeWb(edgeId) {
-    const Store = window.__store;
-    const edge    = Store?.getEdge(edgeId);
-    const fromNode = Store?.getNode(edge?.fromId);
-    const subject  = Store?.getSubject(fromNode?.subjectId);
-    _context = { subjectId: fromNode?.subjectId, edgeId };
+    const S=window.__store;
+    const edge = S?.getEdge(edgeId);
+    const fn   = S?.getNode(edge?.fromId);
+    const subj = S?.getSubject(fn?.subjectId);
+    _ctx = {workspaceId:subj?.workspaceId, subjectId:fn?.subjectId, edgeId};
     setBreadcrumb([
-      { label: 'Galaxy', nav: 'galaxy' },
-      { label: subject?.name || 'Subject', nav: 'cube', id: fromNode?.subjectId },
-      { label: `${fromNode?.label || '?'} ↔ …` },
+      {label:'Home',nav:'home'},
+      {label:subj?.name||'Subject',nav:'cube',id:fn?.subjectId},
+      {label:`${fn?.label||'?'} ↔ …`},
     ]);
     show('edgeWb');
   },
 };
-
 export default Router;

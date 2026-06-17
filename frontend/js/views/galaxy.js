@@ -1,245 +1,197 @@
-// galaxy.js — Three.js galaxy view
+// galaxy.js v2 — Light theme, shaded cube faces, CRUD context menu
 import * as THREE from 'three';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import Store from '../core/store.js';
 import Router from '../core/router.js';
 import Events from '../core/events.js';
+import { openAddSubjectModal, openEditSubjectModal, openConfirmModal } from '../ui/modal.js';
 
 let scene, camera, renderer, labelRenderer, controls;
-let animId = null;
-let cubeGroups = new Map();   // subjectId → THREE.Group
-let hitMeshes  = [];          // invisible meshes for click detection
-let linkLines  = [];          // cross-subject link lines
-let stars;
+let animId=null, cubeGroups=new Map(), hitMeshes=[], linkLines=[];
+let hovered=null;
+const CS=1.2; // cube size
 
-const CUBE_SIZE = 1.3;
-const HOVER_COLOR = 0xffffff;
+export function initGalaxy(container, workspaceId) {
+  if(renderer){ destroyGalaxy(); }
 
-/* ════════════════════════════════════════════
-   INIT
-════════════════════════════════════════════ */
-export function initGalaxy(container) {
-  // ── Scene ────────────────────────────────
+  // Scene — light background
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x09090B);
-  scene.fog = new THREE.FogExp2(0x09090B, 0.018);
+  scene.background = new THREE.Color(0xF0F1F3);
+  scene.fog = new THREE.FogExp2(0xF0F1F3, 0.012);
 
-  // ── Stars ────────────────────────────────
-  const starGeo = new THREE.BufferGeometry();
-  const starPos = new Float32Array(6000);
-  for (let i = 0; i < 6000; i++) starPos[i] = (Math.random() - 0.5) * 120;
-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-  stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.08, transparent: true, opacity: 0.6 }));
-  scene.add(stars);
+  // Floating particles
+  const pGeo = new THREE.BufferGeometry();
+  const pPos = new Float32Array(3000);
+  for(let i=0;i<3000;i++) pPos[i]=(Math.random()-0.5)*80;
+  pGeo.setAttribute('position',new THREE.BufferAttribute(pPos,3));
+  scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({color:0xC4C4CC,size:0.06,transparent:true,opacity:0.7})));
 
-  // ── Ambient light ────────────────────────
-  scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-  const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-  dirLight.position.set(10, 20, 10);
-  scene.add(dirLight);
+  // Lighting
+  scene.add(new THREE.AmbientLight(0xffffff,0.8));
+  const dl = new THREE.DirectionalLight(0xffffff,0.6);
+  dl.position.set(10,20,15); scene.add(dl);
+  const dl2 = new THREE.DirectionalLight(0x8888ff,0.3);
+  dl2.position.set(-10,-5,-15); scene.add(dl2);
 
-  // ── Camera ───────────────────────────────
-  const W = container.clientWidth, H = container.clientHeight;
-  camera = new THREE.PerspectiveCamera(55, W / H, 0.1, 300);
-  camera.position.set(0, 5, 16);
+  const W=container.clientWidth, H=container.clientHeight;
+  camera = new THREE.PerspectiveCamera(55,W/H,0.1,300);
+  camera.position.set(0,5,18);
 
-  // ── WebGL Renderer ───────────────────────
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-  renderer.setSize(W, H);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer = new THREE.WebGLRenderer({antialias:true,alpha:false});
+  renderer.setSize(W,H); renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer.shadowMap.enabled=true;
   container.appendChild(renderer.domElement);
 
-  // ── CSS2D Renderer (labels) ───────────────
   labelRenderer = new CSS2DRenderer();
-  labelRenderer.setSize(W, H);
-  labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+  labelRenderer.setSize(W,H);
+  labelRenderer.domElement.style.cssText='position:absolute;top:0;left:0;pointer-events:none;';
   container.appendChild(labelRenderer.domElement);
 
-  // ── Orbit Controls ────────────────────────
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor  = 0.06;
-  controls.minDistance    = 4;
-  controls.maxDistance    = 40;
-  controls.autoRotate     = true;
-  controls.autoRotateSpeed = 0.4;
+  controls.enableDamping=true; controls.dampingFactor=0.06;
+  controls.minDistance=4; controls.maxDistance=60;
+  controls.autoRotate=true; controls.autoRotateSpeed=0.35;
 
-  // ── Load data ────────────────────────────
-  rebuildScene();
+  rebuildGalaxy(workspaceId);
 
-  // ── Events ───────────────────────────────
-  renderer.domElement.addEventListener('click', onGalaxyClick);
+  renderer.domElement.addEventListener('click', e=>onGalaxyClick(e,workspaceId));
   renderer.domElement.addEventListener('mousemove', onGalaxyHover);
-  window.addEventListener('resize', () => onGalaxyResize(container));
+  renderer.domElement.addEventListener('contextmenu', e=>onGalaxyCtx(e,workspaceId));
+  window.addEventListener('resize',()=>onResize(container));
+  Events.on('subjects:changed', ()=>rebuildGalaxy(workspaceId));
 
-  Events.on('subjects:changed', rebuildScene);
-
-  // ── Start loop ───────────────────────────
   startLoop();
 }
 
 export function destroyGalaxy() {
   stopLoop();
-  Events.off('subjects:changed', rebuildScene);
+  Events.off('subjects:changed',()=>{});
+  cubeGroups.clear(); hitMeshes=[]; linkLines=[];
 }
 
-/* ════════════════════════════════════════════
-   SCENE BUILDER
-════════════════════════════════════════════ */
-function rebuildScene() {
-  // Remove old cubes
-  cubeGroups.forEach(g => scene.remove(g));
-  cubeGroups.clear();
-  hitMeshes = [];
-
-  // Remove old link lines
-  linkLines.forEach(l => scene.remove(l));
-  linkLines = [];
-
-  const subjects = Store.getSubjects();
-  subjects.forEach((subj, i) => {
-    const group = buildSubjectCube(subj, i, subjects.length);
-    scene.add(group);
-    cubeGroups.set(subj.id, group);
-  });
-
-  buildGalaxyLinks(subjects);
+/* ── Build scene ───────────────────────────── */
+function rebuildGalaxy(workspaceId) {
+  cubeGroups.forEach(g=>scene.remove(g));
+  cubeGroups.clear(); hitMeshes=[]; linkLines.forEach(l=>scene.remove(l)); linkLines=[];
+  const subjects = Store.getSubjects(workspaceId);
+  subjects.forEach(s=>{ const g=buildCube(s); scene.add(g); cubeGroups.set(s.id,g); });
+  buildLinks();
 }
 
-function buildSubjectCube(subj, index, total) {
+function buildCube(subj) {
   const group = new THREE.Group();
+  const [px,py,pz] = subj.position||[0,0,0];
+  group.position.set(px,py,pz);
 
-  // Compute circle position (store sets it, but we use stored value)
-  const [px, py, pz] = subj.position || [
-    Math.cos((index / total) * Math.PI * 2) * (3 + total * 0.7),
-    (index % 2 === 0 ? 0.4 : -0.4),
-    Math.sin((index / total) * Math.PI * 2) * (3 + total * 0.7),
-  ];
-  group.position.set(px, py, pz);
+  const color = new THREE.Color(subj.color||'#7C3AED');
 
-  // Wireframe cube
-  const geo   = new THREE.BoxGeometry(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE);
-  const edges = new THREE.EdgesGeometry(geo);
-  const color = new THREE.Color(subj.color || '#8B5CF6');
-  const mat   = new THREE.LineBasicMaterial({ color, linewidth: 1.5 });
-  const wire  = new THREE.LineSegments(edges, mat);
+  // Shaded faces (6 materials, different opacity per face for depth)
+  const faceGeo = new THREE.BoxGeometry(CS,CS,CS);
+  const faceOpacities = [0.20, 0.12, 0.28, 0.08, 0.22, 0.14]; // +x,-x,+y,-y,+z,-z
+  const faceMats = faceOpacities.map(o=>
+    new THREE.MeshLambertMaterial({color, transparent:true, opacity:o, side:THREE.FrontSide})
+  );
+  group.add(new THREE.Mesh(faceGeo, faceMats));
+
+  // Wireframe edges
+  const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(CS,CS,CS));
+  const edgeMat = new THREE.LineBasicMaterial({color, linewidth:1.5});
+  const wire    = new THREE.LineSegments(edgeGeo, edgeMat);
   group.add(wire);
 
-  // Glowing inner sphere
-  const sphereGeo = new THREE.SphereGeometry(0.18, 16, 16);
-  const sphereMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.7 });
-  const sphere    = new THREE.Mesh(sphereGeo, sphereMat);
+  // Center glow sphere
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15,16,16),
+    new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.8})
+  );
   group.add(sphere);
 
   // Invisible hit mesh
-  const hitGeo  = new THREE.BoxGeometry(CUBE_SIZE * 1.1, CUBE_SIZE * 1.1, CUBE_SIZE * 1.1);
-  const hitMat  = new THREE.MeshBasicMaterial({ visible: false });
-  const hitMesh = new THREE.Mesh(hitGeo, hitMat);
-  hitMesh.userData = { subjectId: subj.id, wire, mat, color: color.clone() };
-  group.add(hitMesh);
-  hitMeshes.push(hitMesh);
+  const hitMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(CS*1.15,CS*1.15,CS*1.15),
+    new THREE.MeshBasicMaterial({visible:false})
+  );
+  hitMesh.userData = {subjectId:subj.id, wire, edgeMat, origColor:color.clone()};
+  group.add(hitMesh); hitMeshes.push(hitMesh);
 
-  // CSS2D Label
+  // Label
   const div = document.createElement('div');
-  div.className = 'subject-label';
-  div.innerHTML = `<div class="subject-label-inner" style="color:${subj.color}">${subj.label}</div>`;
-  const label = new CSS2DObject(div);
-  label.position.set(0, CUBE_SIZE * 0.75, 0);
-  group.add(label);
+  div.className='subject-label';
+  div.innerHTML=`<div class="subject-label-inner" style="color:${subj.color}">${subj.label}<span style="font-weight:400;margin-left:4px;color:#71717A;font-size:9px">${subj.name}</span></div>`;
+  const lbl = new CSS2DObject(div);
+  lbl.position.set(0,CS*0.82,0); group.add(lbl);
 
-  group.userData = { subjectId: subj.id };
+  group.userData={subjectId:subj.id};
   return group;
 }
 
-function buildGalaxyLinks(subjects) {
-  const pairs = Store.getSubjectPairs();
-  pairs.forEach(([aId, bId]) => {
-    const ga = cubeGroups.get(aId);
-    const gb = cubeGroups.get(bId);
-    if (!ga || !gb) return;
-
-    const points = [ga.position.clone(), gb.position.clone()];
-    const geo = new THREE.BufferGeometry().setFromPoints(points);
-    const mat = new THREE.LineDashedMaterial({
-      color: 0x6366f1, dashSize: 0.3, gapSize: 0.2,
-      transparent: true, opacity: 0.5,
-    });
-    const line = new THREE.Line(geo, mat);
-    line.computeLineDistances();
-    scene.add(line);
-    linkLines.push(line);
+function buildLinks() {
+  Store.getSubjectPairs().forEach(([aId,bId])=>{
+    const ga=cubeGroups.get(aId), gb=cubeGroups.get(bId);
+    if(!ga||!gb) return;
+    const pts=[ga.position.clone(),gb.position.clone()];
+    const geo=new THREE.BufferGeometry().setFromPoints(pts);
+    const mat=new THREE.LineDashedMaterial({color:0x7C3AED,dashSize:0.35,gapSize:0.2,transparent:true,opacity:0.35});
+    const ln=new THREE.Line(geo,mat); ln.computeLineDistances();
+    scene.add(ln); linkLines.push(ln);
   });
 }
 
-/* ════════════════════════════════════════════
-   INTERACTION
-════════════════════════════════════════════ */
-const raycaster = new THREE.Raycaster();
-const mouse     = new THREE.Vector2();
-let   hovered   = null;
+/* ── Interaction ───────────────────────────── */
+const raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
+function getPtr(e,el){ const r=el.getBoundingClientRect(); mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1; }
 
-function getPointer(e, el) {
-  const rect = el.getBoundingClientRect();
-  mouse.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
-  mouse.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
-}
-
-function onGalaxyClick(e) {
-  getPointer(e, renderer.domElement);
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(hitMeshes);
-  if (hits.length > 0) {
-    const { subjectId } = hits[0].object.userData;
-    controls.autoRotate = false;
-    Router.goCube(subjectId);
-  }
+function onGalaxyClick(e, workspaceId) {
+  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
+  const hits=raycaster.intersectObjects(hitMeshes);
+  if(hits.length>0){ controls.autoRotate=false; Router.goCube(hits[0].object.userData.subjectId); }
 }
 
 function onGalaxyHover(e) {
-  getPointer(e, renderer.domElement);
-  raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(hitMeshes);
-
-  if (hovered) {
-    hovered.userData.mat.color.copy(hovered.userData.color);
-    hovered = null;
-    renderer.domElement.style.cursor = 'default';
-  }
-
-  if (hits.length > 0) {
-    hovered = hits[0].object;
-    hovered.userData.mat.color.set(HOVER_COLOR);
-    renderer.domElement.style.cursor = 'pointer';
-  }
+  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
+  if(hovered){ hovered.userData.edgeMat.color.copy(hovered.userData.origColor); hovered=null; renderer.domElement.style.cursor='default'; }
+  const hits=raycaster.intersectObjects(hitMeshes);
+  if(hits.length>0){ hovered=hits[0].object; hovered.userData.edgeMat.color.set(0x000000); renderer.domElement.style.cursor='pointer'; }
 }
 
-/* ════════════════════════════════════════════
-   LOOP + RESIZE
-════════════════════════════════════════════ */
+function onGalaxyCtx(e, workspaceId) {
+  e.preventDefault();
+  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
+  const hits=raycaster.intersectObjects(hitMeshes);
+  const subjectId = hits.length>0 ? hits[0].object.userData.subjectId : null;
+
+  const items = subjectId ? [
+    {icon:'✏️', label:'Edit Subject',  action:()=>openEditSubjectModal(subjectId)},
+    {sep:true},
+    {icon:'🗑️', label:'Delete Subject', danger:true, action:()=>openConfirmModal({
+      title:'Delete Subject', confirmText:'Delete',
+      message:`Delete "<b>${Store.getSubject(subjectId)?.name}</b>"? All units and nodes inside will also be removed.`,
+      onConfirm:()=>{ Store.deleteSubject(subjectId); Events.emit('subjects:changed'); }
+    })},
+  ] : [
+    {icon:'➕', label:'Add Subject', action:()=>openAddSubjectModal(workspaceId)},
+  ];
+  showCtxMenu(e.clientX, e.clientY, items);
+}
+
+/* ── Loop ──────────────────────────────────── */
 function startLoop() {
-  if (animId !== null) return;
-  function tick() {
-    animId = requestAnimationFrame(tick);
-    controls.update();
-    stars.rotation.y += 0.00015;
-    renderer.render(scene, camera);
-    labelRenderer.render(scene, camera);
-  }
+  if(animId!==null) return;
+  function tick(){ animId=requestAnimationFrame(tick); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); }
   tick();
 }
+function stopLoop() { if(animId!==null) cancelAnimationFrame(animId); animId=null; }
+function onResize(c) { const W=c.clientWidth,H=c.clientHeight; camera.aspect=W/H; camera.updateProjectionMatrix(); renderer.setSize(W,H); labelRenderer.setSize(W,H); }
 
-function stopLoop() {
-  if (animId !== null) cancelAnimationFrame(animId);
-  animId = null;
+/* ── Context menu helper ───────────────────── */
+function showCtxMenu(x,y,items) {
+  const el=document.getElementById('ctxMenu');
+  el.innerHTML=items.map((it,i)=>it.sep?`<div class="ctx-sep"></div>`:
+    `<div class="ctx-item${it.danger?' danger':''}" data-i="${i}">${it.icon||''} ${it.label}</div>`
+  ).join('');
+  el.style.display='block'; el.style.left=`${Math.min(x,window.innerWidth-180)}px`; el.style.top=`${Math.min(y,window.innerHeight-100)}px`;
+  el.querySelectorAll('.ctx-item').forEach(el2=>{ const i=+el2.dataset.i; if(!isNaN(i)&&items[i]) el2.addEventListener('click',()=>{items[i].action?.(); el.style.display='none';}); });
 }
 
-function onGalaxyResize(container) {
-  const W = container.clientWidth, H = container.clientHeight;
-  camera.aspect = W / H;
-  camera.updateProjectionMatrix();
-  renderer.setSize(W, H);
-  labelRenderer.setSize(W, H);
-}
-
-export { rebuildScene as refreshGalaxy };
+export {rebuildGalaxy};
