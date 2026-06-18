@@ -105,9 +105,19 @@ export function initSubcube(wsId, subjectId, unitId) {
   animate();
 }
 
+// ── CSS2D cleanup helper (prevents duplicate labels on rebuild) ────────────
+function removeCSS2DObjects(object) {
+  object.traverse(child => {
+    if (child.isCSS2DObject && child.element && child.element.parentNode) {
+      child.element.parentNode.removeChild(child.element);
+    }
+  });
+}
+
 export function rebuildSubcubeScene() {
-  nodeMeshes.forEach(n=>scene.remove(n.group));
-  edgeLines.forEach(l=>scene.remove(l));
+  // FIX: explicitly remove CSS2DObject DOM elements before clearing scene
+  nodeMeshes.forEach(n => { removeCSS2DObjects(n.group); scene.remove(n.group); });
+  edgeLines.forEach(l => scene.remove(l));
   nodeMeshes=[]; edgeLines=[];
 
   // FIX: scope nodes to this specific unitId — they should NOT appear in other units
@@ -263,8 +273,15 @@ function onClick(e) {
   if(!hit) return;
   const obj=hit.object;
   if(linkMode) {
-    if(!obj.userData.nodeId||obj.userData.nodeId===linkSource) return;
-    createEdge(_wsId,_subjectId,_unitId,linkSource,obj.userData.nodeId,'');
+    if(!obj.userData.nodeId) return;
+    const clickedId = obj.userData.nodeId;
+    // FIX: two-phase link — first click sets source, second click completes the edge
+    if (!linkSource) {
+      linkSource = clickedId;
+      return; // animate() highlights it
+    }
+    if(clickedId===linkSource) return;
+    createEdge(_wsId,_subjectId,_unitId,linkSource,clickedId,'');
     setSubLinkMode(false);
     rebuildEdgeLines();
     return;

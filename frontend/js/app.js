@@ -219,8 +219,8 @@ function setupCubeHUD(wsId, subjectId) {
     const active = btn.classList.toggle('active');
     if (!active) { setLinkMode(false); }
     else {
-      // wait for first node click in cube.js onClick linkMode
-      setLinkMode(true, null); // will be set properly on first click
+      // FIX: null source — two-phase handled in cube.js onClick (first click sets source)
+      setLinkMode(true, null);
     }
   };
   document.getElementById('cubeBackBtn').onclick = on_backToGalaxy;
@@ -234,7 +234,10 @@ function setupSubcubeHUD(wsId, subjectId, unitId) {
   document.getElementById('addSubNodeBtn').onclick = () => openAddSubNodeModal(wsId, subjectId, unitId);
   document.getElementById('subcubeLinkBtn').onclick = () => {
     const btn = document.getElementById('subcubeLinkBtn');
-    btn.classList.toggle('active');
+    const active = btn.classList.toggle('active');
+    // FIX: actually activate link mode (was only toggling CSS class before)
+    if (active) setSubLinkMode(true, null);
+    else         setSubLinkMode(false);
   };
   document.getElementById('subcubeBackBtn').onclick = on_backToCube;
   document.getElementById('cancelSubLinkBtn').onclick = () => {

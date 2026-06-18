@@ -1,14 +1,19 @@
 /* ═══════════════════════════════════════════
    CUBE — subject interior (units as sub-cubes)
-   FIX: workspace isolation, free object movement,
-        link mode fixed, cross-layer links
+   FIXES:
+   • Units are freely draggable (persisted via updateUnit)
+   • Nodes are freely draggable (static updateNode import, no dynamic import)
+   • CSS2DObject DOM cleanup before scene.remove (no duplicate labels)
+   • Stored unit positions used on rebuild (not reset to grid)
+   • Link mode: two-phase click (first click = source, second = target)
+   • Unit auto-rotation paused while dragging
 ═══════════════════════════════════════════ */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import {
-  getSubject, getUnits, createUnit, deleteUnit,
-  getNodes, createNode, deleteNode,
+  getSubject, getUnits, createUnit, deleteUnit, updateUnit,
+  getNodes, createNode, deleteNode, updateNode,
   getEdges, createEdge, deleteEdge,
   getCrossEdgesForNode, getNode, getAllNodesForWorkspace,
   PALETTE, uid
@@ -19,8 +24,8 @@ import { openCrossLinkModal } from './cross-link.js';
 
 let renderer, labelRenderer, scene, camera, controls, animId;
 let _wsId = null, _subjectId = null;
-let unitMeshes = [];   // { mesh, unitId }
-let nodeMeshes = [];   // { mesh, nodeId }
+let unitMeshes = [];   // { group, mesh, unitId }
+let nodeMeshes = [];   // { group, mesh, nodeId }
 let edgeLines  = [];
 let linkMode   = false;
 let linkSource = null;
@@ -29,11 +34,11 @@ let dragPlane  = new THREE.Plane();
 let dragOffset = new THREE.Vector3();
 let hovered    = null;
 let ctxTarget  = null;
+let _mouseDownPos = null;
 const raycaster = new THREE.Raycaster();
 const pointer   = new THREE.Vector2();
-const _mouse    = new THREE.Vector2();
 
-// ── unit grid positions ────────────────────────────────────────────────────
+// ── unit grid positions (used only when no stored pos exists) ──────────────
 function unitPosition(idx, total) {
   const cols = Math.ceil(Math.sqrt(total));
   const row  = Math.floor(idx / cols);
@@ -44,20 +49,18 @@ function unitPosition(idx, total) {
   return new THREE.Vector3(offX + col*spacing, 0, offZ + row*spacing);
 }
 
-// ── node positions on a unit cube face ────────────────────────────────────
-function nodePosition(idx, total, unitPos) {
-  const r     = 1.8;
-  const angle = (idx / Math.max(total,1)) * Math.PI * 2;
-  return new THREE.Vector3(
-    unitPos.x + r * Math.cos(angle),
-    unitPos.y + 1.5 + (idx % 2) * 0.6,
-    unitPos.z + r * Math.sin(angle)
-  );
+// ── CSS2D cleanup helper (prevents duplicate labels on rebuild) ────────────
+function removeCSS2DObjects(object) {
+  object.traverse(child => {
+    if (child.isCSS2DObject && child.element && child.element.parentNode) {
+      child.element.parentNode.removeChild(child.element);
+    }
+  });
 }
 
 export function initCube(wsId, subjectId) {
   _wsId = wsId; _subjectId = subjectId;
-  linkMode = false; linkSource = null;
+  linkMode = false; linkSource = null; dragging = null; _mouseDownPos = null;
   const container = document.getElementById('cube-container');
   container.innerHTML = '';
   unitMeshes = []; nodeMeshes = []; edgeLines = [];
@@ -79,11 +82,9 @@ export function initCube(wsId, subjectId) {
   camera = new THREE.PerspectiveCamera(55, container.clientWidth/container.clientHeight, 0.1, 500);
   camera.position.set(0, 10, 22);
 
-  const aL = new THREE.AmbientLight(0xffffff, 0.5);
-  scene.add(aL);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
   const dL = new THREE.DirectionalLight(0xffffff, 0.8);
-  dL.position.set(8, 16, 8);
-  scene.add(dL);
+  dL.position.set(8, 16, 8); scene.add(dL);
   addStars();
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -107,39 +108,36 @@ export function initCube(wsId, subjectId) {
 
 function addStars() {
   const geo = new THREE.BufferGeometry();
-  const cnt = 600;
-  const pos = new Float32Array(cnt*3);
+  const cnt = 600; const pos = new Float32Array(cnt*3);
   for (let i=0;i<cnt*3;i++) pos[i]=(Math.random()-0.5)*250;
   geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
   scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color:0x4B4F66, size:0.1, transparent:true, opacity:0.7 })));
 }
 
 export function rebuildCubeScene() {
-  // Clear old objects
-  unitMeshes.forEach(u => scene.remove(u.group));
-  nodeMeshes.forEach(n => scene.remove(n.group));
+  // FIX: remove CSS2DObject DOM elements before clearing scene objects
+  unitMeshes.forEach(u => { removeCSS2DObjects(u.group); scene.remove(u.group); });
+  nodeMeshes.forEach(n => { removeCSS2DObjects(n.group); scene.remove(n.group); });
   edgeLines.forEach(l => scene.remove(l));
   unitMeshes=[]; nodeMeshes=[]; edgeLines=[];
 
-  const sub   = getSubject(_subjectId);
   const units = getUnits(_subjectId);
 
-  // Units
+  // FIX: use stored position if unit was previously dragged, otherwise use grid layout
   units.forEach((unit, idx) => {
-    const pos = unitPosition(idx, units.length);
+    const pos = unit.pos
+      ? new THREE.Vector3(unit.pos.x, unit.pos.y, unit.pos.z)
+      : unitPosition(idx, units.length);
     addUnitMesh(unit, pos);
   });
 
   // Nodes on this subject (no unitId)
   const nodes = getNodes(_subjectId, null);
-  const unitCount = units.length;
-  nodes.forEach((node, idx) => {
-    // Use stored position or calculate default
-    const p = node.pos || { x: (idx%4-1.5)*3, y: unitCount>0?0:-0.5, z: Math.floor(idx/4)*3-2 };
+  nodes.forEach((node) => {
+    const p = node.pos || { x: (Math.random()-0.5)*12, y: 1, z: (Math.random()-0.5)*12 };
     addNodeMesh(node, new THREE.Vector3(p.x, p.y, p.z));
   });
 
-  // Edges
   rebuildEdgeLines();
 }
 
@@ -148,7 +146,6 @@ function addUnitMesh(unit, pos) {
   const group = new THREE.Group();
   group.position.copy(pos);
 
-  // Main box
   const geo = new THREE.BoxGeometry(2.4, 2.4, 2.4);
   const mat = new THREE.MeshStandardMaterial({
     color: col, transparent: true, opacity: 0.75,
@@ -158,14 +155,11 @@ function addUnitMesh(unit, pos) {
   const mesh = new THREE.Mesh(geo, mat);
   group.add(mesh);
 
-  // Edges wireframe
-  const wire = new THREE.LineSegments(
+  group.add(new THREE.LineSegments(
     new THREE.EdgesGeometry(geo),
     new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.6 })
-  );
-  group.add(wire);
+  ));
 
-  // Label
   const div = document.createElement('div');
   div.className = 'unit-label';
   div.innerHTML = `<div class="unit-label-inner" style="color:${unit.color};border-color:${unit.color}33">${unit.name}</div>`;
@@ -176,7 +170,7 @@ function addUnitMesh(unit, pos) {
   group.userData = { unitId: unit.id, type:'unit', color: col, isUnit: true };
   mesh.userData  = { unitId: unit.id, type:'unit', color: col, isUnit: true };
   scene.add(group);
-  unitMeshes.push({ group, mesh, unitId: unit.id, pos });
+  unitMeshes.push({ group, mesh, unitId: unit.id });
 }
 
 function addNodeMesh(node, pos) {
@@ -192,14 +186,13 @@ function addNodeMesh(node, pos) {
   const mesh = new THREE.Mesh(geo, mat);
   group.add(mesh);
 
-  // Glow ring
-  const ringGeo = new THREE.RingGeometry(0.65, 0.75, 32);
-  const ringMat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
-  const ring = new THREE.Mesh(ringGeo, ringMat);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.65, 0.75, 32),
+    new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
+  );
   ring.rotation.x = -Math.PI/2;
   group.add(ring);
 
-  // Label
   const div = document.createElement('div');
   div.className = 'node-label';
   div.innerHTML = `<div class="node-label-inner">${node.name}</div>`;
@@ -221,12 +214,12 @@ function rebuildEdgeLines() {
     const fromM = nodeMeshes.find(m => m.nodeId === edge.fromNodeId);
     const toM   = nodeMeshes.find(m => m.nodeId === edge.toNodeId);
     if (!fromM || !toM) return;
-    const points = [fromM.group.position.clone(), toM.group.position.clone()];
-    const geo = new THREE.BufferGeometry().setFromPoints(points);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xA78BFA, transparent: true, opacity: 0.7, linewidth: 2 }));
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      fromM.group.position.clone(), toM.group.position.clone()
+    ]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xA78BFA, transparent: true, opacity: 0.7 }));
     line.userData = { edgeId: edge.id };
-    scene.add(line);
-    edgeLines.push(line);
+    scene.add(line); edgeLines.push(line);
   });
 }
 
@@ -235,12 +228,17 @@ function animate() {
   if (!renderer || !scene || !camera) return;
   const t = Date.now()*0.001;
   unitMeshes.forEach((u,i) => {
-    u.group.rotation.y = t*0.15 + i*0.8;
+    // FIX: pause auto-rotation while this unit is being dragged
+    if (!dragging || dragging.unitId !== u.unitId) {
+      u.group.rotation.y = t*0.15 + i*0.8;
+    }
     if (u.mesh === hovered) u.mesh.material.emissiveIntensity = 0.4 + Math.sin(t*4)*0.15;
     else u.mesh.material.emissiveIntensity = 0.12;
   });
   nodeMeshes.forEach((n,i) => {
-    n.group.position.y += Math.sin(t*1.5+i)*0.0015;
+    if (!dragging || dragging.nodeId !== n.nodeId) {
+      n.group.position.y += Math.sin(t*1.5+i)*0.0015;
+    }
     if (n.mesh === hovered || (linkMode && n.nodeId === linkSource)) {
       n.mesh.material.emissiveIntensity = 0.6 + Math.sin(t*5)*0.2;
       n.group.scale.setScalar(1.12);
@@ -258,8 +256,8 @@ function animate() {
 function getPointerNDC(e) {
   const rect = renderer.domElement.getBoundingClientRect();
   return {
-    x: ((e.clientX-rect.left)/rect.width)*2-1,
-    y:-((e.clientY-rect.top)/rect.height)*2+1
+    x:  ((e.clientX-rect.left)/rect.width)*2-1,
+    y: -((e.clientY-rect.top) /rect.height)*2+1
   };
 }
 function getIntersected(e, meshList) {
@@ -270,10 +268,40 @@ function getIntersected(e, meshList) {
   return hits.length ? hits[0] : null;
 }
 function allPickable() {
-  return [
-    ...unitMeshes.map(u=>u.mesh),
-    ...nodeMeshes.map(n=>n.mesh)
-  ];
+  return [...unitMeshes.map(u=>u.mesh), ...nodeMeshes.map(n=>n.mesh)];
+}
+
+// ── Drag ──────────────────────────────────────────────────────────────────
+function startDrag(e, entry, groupPos) {
+  dragging = entry;
+  controls.enabled = false;
+  e.stopPropagation();
+  const normal = new THREE.Vector3().subVectors(camera.position, groupPos).normalize();
+  dragPlane.setFromNormalAndCoplanarPoint(normal, groupPos);
+  const ndc = getPointerNDC(e);
+  raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+  const ip = new THREE.Vector3();
+  raycaster.ray.intersectPlane(dragPlane, ip);
+  dragOffset.subVectors(ip, groupPos);
+}
+
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  _mouseDownPos = { x: e.clientX, y: e.clientY };
+  if (linkMode) return;
+
+  // FIX: check unit meshes first (units are larger so check them first)
+  const unitHit = getIntersected(e, unitMeshes.map(u=>u.mesh));
+  if (unitHit) {
+    const entry = unitMeshes.find(u => u.mesh === unitHit.object);
+    if (entry) { startDrag(e, entry, entry.group.position.clone()); return; }
+  }
+
+  // then nodes
+  const nodeHit = getIntersected(e, nodeMeshes.map(n=>n.mesh));
+  if (!nodeHit) return;
+  const entry = nodeMeshes.find(n => n.mesh === nodeHit.object);
+  if (entry) startDrag(e, entry, entry.group.position.clone());
 }
 
 function onPointerMove(e) {
@@ -281,55 +309,29 @@ function onPointerMove(e) {
   hovered = hit ? hit.object : null;
   renderer.domElement.style.cursor = hovered ? 'pointer' : 'default';
 
-  // Drag
   if (dragging) {
     controls.enabled = false;
-    const n = getPointerNDC(e);
-    raycaster.setFromCamera(new THREE.Vector2(n.x,n.y), camera);
+    const ndc = getPointerNDC(e);
+    raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
     const target = new THREE.Vector3();
     raycaster.ray.intersectPlane(dragPlane, target);
     dragging.group.position.copy(target.sub(dragOffset));
-    // Persist position
-    if (dragging.nodeId) {
-      const p = dragging.group.position;
-      import('../core/store.js').then(s=>s.updateNode(dragging.nodeId,{pos:{x:p.x,y:p.y,z:p.z}}));
-    }
+    const p = dragging.group.position;
+    // FIX: use static imports (no dynamic import()) for both unit and node
+    if (dragging.unitId) updateUnit(dragging.unitId, { pos: { x: p.x, y: p.y, z: p.z } });
+    if (dragging.nodeId) updateNode(dragging.nodeId, { pos: { x: p.x, y: p.y, z: p.z } });
     rebuildEdgeLines();
   }
 }
 
-let _mouseDownPos = null;
-function onPointerDown(e) {
-  if (e.button !== 0) return;
-  _mouseDownPos = { x: e.clientX, y: e.clientY };
-  if (linkMode) return;
-  const hit = getIntersected(e, nodeMeshes.map(n=>n.mesh));
-  if (!hit) return;
-  const nodeEntry = nodeMeshes.find(n=>n.mesh===hit.object);
-  if (!nodeEntry) return;
-  e.stopPropagation();
-  dragging = nodeEntry;
-  controls.enabled = false;
-  // Build drag plane facing camera
-  const n = new THREE.Vector3().subVectors(camera.position, nodeEntry.group.position).normalize();
-  dragPlane.setFromNormalAndCoplanarPoint(n, nodeEntry.group.position);
-  const pointerNDC = getPointerNDC(e);
-  raycaster.setFromCamera(new THREE.Vector2(pointerNDC.x, pointerNDC.y), camera);
-  const ip = new THREE.Vector3();
-  raycaster.ray.intersectPlane(dragPlane, ip);
-  dragOffset.subVectors(ip, nodeEntry.group.position);
-}
-
-function onPointerUp(e) {
+function onPointerUp() {
   dragging = null;
   controls.enabled = true;
 }
 
 function onClick(e) {
-  // Only fire click if mouse didn't move (drag prevention)
   if (_mouseDownPos) {
-    const dx = e.clientX - _mouseDownPos.x;
-    const dy = e.clientY - _mouseDownPos.y;
+    const dx = e.clientX - _mouseDownPos.x, dy = e.clientY - _mouseDownPos.y;
     if (Math.sqrt(dx*dx+dy*dy) > 5) return;
   }
   const hit = getIntersected(e, allPickable());
@@ -337,11 +339,15 @@ function onClick(e) {
   const obj = hit.object;
 
   if (linkMode) {
-    // Link mode: picking second node
     if (!obj.userData.nodeId) return;
-    const toId = obj.userData.nodeId;
-    if (toId === linkSource) return;
-    createEdge(_wsId, _subjectId, null, linkSource, toId, '');
+    const clickedId = obj.userData.nodeId;
+    // FIX: two-phase link — first click sets source, second click completes the edge
+    if (!linkSource) {
+      linkSource = clickedId;
+      return; // animate() will highlight it via linkSource check
+    }
+    if (clickedId === linkSource) return; // clicked same node twice
+    createEdge(_wsId, _subjectId, null, linkSource, clickedId, '');
     setLinkMode(false);
     rebuildEdgeLines();
     return;
@@ -421,6 +427,7 @@ function showCtxMenu(x, y) {
     };
     menu.querySelector('#ctxLink').onclick = () => {
       hideCtxMenu();
+      // context-menu link: source is already known, so set it directly
       setLinkMode(true, ctxTarget.nodeId);
     };
     menu.querySelector('#ctxCrossLink').onclick = () => {
@@ -476,8 +483,7 @@ export function openAddUnitModal(wsId, subjectId) {
     document.querySelectorAll('.color-swatch[data-color]').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.color-swatch[data-color]').forEach(b=>b.classList.remove('selected'));
-        btn.classList.add('selected');
-        chosenColor = btn.dataset.color;
+        btn.classList.add('selected'); chosenColor = btn.dataset.color;
       });
     });
   }, 0);
@@ -512,8 +518,7 @@ export function openAddNodeModal(wsId, subjectId, unitId) {
     document.querySelectorAll('.color-swatch[data-color]').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('.color-swatch[data-color]').forEach(b=>b.classList.remove('selected'));
-        btn.classList.add('selected');
-        chosenColor = btn.dataset.color;
+        btn.classList.add('selected'); chosenColor = btn.dataset.color;
       });
     });
   }, 0);

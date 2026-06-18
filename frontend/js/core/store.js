@@ -81,6 +81,12 @@ export function deleteSubject(subId) {
                 : true)
   }));
 }
+export function updateSubject(subId, patch) {
+  set(s => ({
+    ...s,
+    subjects: (s.subjects || []).map(sub => sub.id === subId ? { ...sub, ...patch } : sub)
+  }));
+}
 
 // ── Unit helpers ───────────────────────────────────────────────────────────
 export function getUnits(subjectId) {
@@ -100,6 +106,12 @@ export function deleteUnit(unitId) {
     units: (s.units || []).filter(u => u.id !== unitId),
     nodes: (s.nodes || []).filter(n => n.unitId !== unitId),
     edges: (s.edges || []).filter(e => e.unitId !== unitId)
+  }));
+}
+export function updateUnit(unitId, patch) {
+  set(s => ({
+    ...s,
+    units: (s.units || []).map(u => u.id === unitId ? { ...u, ...patch } : u)
   }));
 }
 

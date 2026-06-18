@@ -1,25 +1,33 @@
 /* ═══════════════════════════════════════════
    GALAXY — 3-D subject cloud (Three.js)
-   FIX: fully workspace-scoped, subjects isolated per workspace
+   FIXES:
+   • Free drag of subject cubes (persisted via updateSubject)
+   • CSS2DObject DOM cleanup before scene.remove (no duplicate labels)
+   • Click vs drag discrimination via _mouseDownPos
+   • Rotation paused for the cube being dragged
 ═══════════════════════════════════════════ */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import { getSubjects, createSubject, deleteSubject, PALETTE } from '../core/store.js';
+import { getSubjects, createSubject, deleteSubject, updateSubject, PALETTE } from '../core/store.js';
 import { emit } from '../core/events.js';
 import { openModal } from '../ui/modal.js';
 
 let renderer, labelRenderer, scene, camera, controls, animId;
 let _wsId = null;
-let cubes = [];   // { mesh, subjectId }
+let cubes = [];   // { mesh, subjectId, label }
 const raycaster  = new THREE.Raycaster();
 const pointer    = new THREE.Vector2();
-let   hovered    = null;
-let   ctxTarget  = null;
+let hovered      = null;
+let ctxTarget    = null;
 
-const COLORS = PALETTE;
+// ── drag state ─────────────────────────────────────────────────────────────
+let dragging      = null;   // cube entry being dragged
+let _mouseDownPos = null;
+const dragPlane   = new THREE.Plane();
+const dragOffset  = new THREE.Vector3();
 
-// ── Subject position distribution ─────────────────────────────────────────
+// ── Subject position (default spherical layout) ────────────────────────────
 function subjectPosition(idx, total) {
   if (total <= 1) return new THREE.Vector3(0, 0, 0);
   const φ = Math.acos(1 - 2*(idx+0.5)/total);
@@ -32,34 +40,38 @@ function subjectPosition(idx, total) {
   );
 }
 
+// ── CSS2D cleanup helper (prevents duplicate labels) ──────────────────────
+function removeCSS2DObjects(object) {
+  object.traverse(child => {
+    if (child.isCSS2DObject && child.element && child.element.parentNode) {
+      child.element.parentNode.removeChild(child.element);
+    }
+  });
+}
+
 export function initGalaxy(wsId) {
   _wsId = wsId;
   const container = document.getElementById('galaxy-container');
   container.innerHTML = '';
-  cubes = [];
+  cubes = []; dragging = null; _mouseDownPos = null;
 
-  // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.setClearColor(0x0A0B0E, 1);
   container.appendChild(renderer.domElement);
 
-  // Label renderer
   labelRenderer = new CSS2DRenderer();
   labelRenderer.setSize(container.clientWidth, container.clientHeight);
   labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
   container.appendChild(labelRenderer.domElement);
 
-  // Scene
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x0A0B0E, 0.018);
 
-  // Camera
   camera = new THREE.PerspectiveCamera(55, container.clientWidth/container.clientHeight, 0.1, 500);
   camera.position.set(0, 4, 20);
 
-  // Lights
   scene.add(new THREE.AmbientLight(0xffffff, 0.6));
   const dLight = new THREE.DirectionalLight(0xffffff, 0.9);
   dLight.position.set(10, 20, 10);
@@ -68,26 +80,23 @@ export function initGalaxy(wsId) {
   pLight.position.set(0, 10, 0);
   scene.add(pLight);
 
-  // Stars
   addStars();
 
-  // Controls
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.06;
   controls.minDistance   = 4;
   controls.maxDistance   = 60;
 
-  // Build subjects (workspace-scoped)
   rebuildScene();
 
-  // Events
-  renderer.domElement.addEventListener('pointermove', onPointerMove);
-  renderer.domElement.addEventListener('click',       onClick);
-  renderer.domElement.addEventListener('contextmenu', onContextMenu);
+  renderer.domElement.addEventListener('pointermove',  onPointerMove);
+  renderer.domElement.addEventListener('pointerdown',  onPointerDown);
+  renderer.domElement.addEventListener('pointerup',    onPointerUp);
+  renderer.domElement.addEventListener('click',        onClick);
+  renderer.domElement.addEventListener('contextmenu',  onContextMenu);
   window.addEventListener('resize', onResize);
 
-  // Animate
   if (animId) cancelAnimationFrame(animId);
   animate();
 }
@@ -103,17 +112,23 @@ function addStars() {
 }
 
 export function rebuildScene() {
-  // Remove old cubes
-  cubes.forEach(c => { scene.remove(c.mesh); c.label?.element?.parentNode?.removeChild(c.label.element); });
+  // FIX: explicitly remove CSS2DObject DOM elements before removing meshes
+  cubes.forEach(c => {
+    removeCSS2DObjects(c.mesh);
+    scene.remove(c.mesh);
+  });
   cubes = [];
 
-  // Only subjects for current workspace
   const subjects = getSubjects(_wsId);
   subjects.forEach((sub, idx) => {
-    const pos  = subjectPosition(idx, subjects.length);
-    const col  = parseInt(sub.color.replace('#',''), 16);
+    // FIX: use stored position if the subject was dragged previously
+    const storedPos = sub.pos;
+    const pos = storedPos
+      ? new THREE.Vector3(storedPos.x, storedPos.y, storedPos.z)
+      : subjectPosition(idx, subjects.length);
 
-    // Geometry: glowing cube
+    const col = parseInt(sub.color.replace('#',''), 16);
+
     const geo  = new THREE.BoxGeometry(1.6, 1.6, 1.6);
     const mat  = new THREE.MeshStandardMaterial({
       color: col, transparent: true, opacity: 0.85,
@@ -125,14 +140,12 @@ export function rebuildScene() {
     mesh.userData = { subjectId: sub.id, color: col, baseEmissive: 0.15 };
     scene.add(mesh);
 
-    // Wire frame
     const edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(geo),
       new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.5 })
     );
     mesh.add(edges);
 
-    // Label
     const div = document.createElement('div');
     div.className = 'subject-label';
     div.innerHTML = `<div class="subject-label-inner" style="color:${sub.color};border-color:${sub.color}40">${sub.name}</div>`;
@@ -149,6 +162,8 @@ function animate() {
   if (!renderer || !scene || !camera) return;
   const t = Date.now()*0.001;
   cubes.forEach((c, i) => {
+    // FIX: pause rotation for the cube being dragged
+    if (dragging && dragging.subjectId === c.subjectId) return;
     c.mesh.rotation.x = Math.sin(t*0.4 + i)*0.12;
     c.mesh.rotation.y = t*0.3 + i*1.2;
     if (c.mesh === hovered) {
@@ -164,22 +179,73 @@ function animate() {
   labelRenderer.render(scene, camera);
 }
 
-function getIntersected(event) {
+// ── Pointer helpers ────────────────────────────────────────────────────────
+function getPointerNDC(e) {
   const rect = renderer.domElement.getBoundingClientRect();
-  pointer.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
-  pointer.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+  return {
+    x:  ((e.clientX - rect.left) / rect.width)  * 2 - 1,
+    y: -((e.clientY - rect.top)  / rect.height) * 2 + 1
+  };
+}
+
+function getIntersected(e) {
+  const n = getPointerNDC(e);
+  pointer.set(n.x, n.y);
   raycaster.setFromCamera(pointer, camera);
   const meshes = cubes.map(c => c.mesh);
   const hits   = raycaster.intersectObjects(meshes, false);
   return hits.length ? hits[0].object : null;
 }
 
+// ── Drag handlers ──────────────────────────────────────────────────────────
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  _mouseDownPos = { x: e.clientX, y: e.clientY };
+  const mesh = getIntersected(e);
+  if (!mesh) return;
+  const entry = cubes.find(c => c.mesh === mesh);
+  if (!entry) return;
+  // begin drag
+  dragging = entry;
+  controls.enabled = false;
+  e.stopPropagation();
+  const normal = new THREE.Vector3().subVectors(camera.position, mesh.position).normalize();
+  dragPlane.setFromNormalAndCoplanarPoint(normal, mesh.position);
+  const ndc = getPointerNDC(e);
+  raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+  const ip = new THREE.Vector3();
+  raycaster.ray.intersectPlane(dragPlane, ip);
+  dragOffset.subVectors(ip, mesh.position);
+}
+
 function onPointerMove(e) {
+  if (dragging) {
+    const ndc = getPointerNDC(e);
+    raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), camera);
+    const target = new THREE.Vector3();
+    raycaster.ray.intersectPlane(dragPlane, target);
+    dragging.mesh.position.copy(target.sub(dragOffset));
+    // persist position immediately so it survives rebuilds
+    const p = dragging.mesh.position;
+    updateSubject(dragging.subjectId, { pos: { x: p.x, y: p.y, z: p.z } });
+    return;
+  }
   hovered = getIntersected(e);
   renderer.domElement.style.cursor = hovered ? 'pointer' : 'default';
 }
 
+function onPointerUp() {
+  dragging = null;
+  controls.enabled = true;
+}
+
 function onClick(e) {
+  // FIX: suppress click if mouse moved more than 5 px (it was a drag)
+  if (_mouseDownPos) {
+    const dx = e.clientX - _mouseDownPos.x;
+    const dy = e.clientY - _mouseDownPos.y;
+    if (Math.sqrt(dx*dx + dy*dy) > 5) return;
+  }
   const mesh = getIntersected(e);
   if (!mesh) return;
   const { subjectId } = mesh.userData;
@@ -276,7 +342,7 @@ export function destroyGalaxy() {
   if (renderer) { renderer.dispose(); renderer = null; }
   labelRenderer = null;
   scene = null; camera = null; controls = null;
-  cubes = []; hovered = null;
+  cubes = []; hovered = null; dragging = null;
   const c = document.getElementById('galaxy-container');
   if (c) c.innerHTML = '';
   window.removeEventListener('resize', onResize);
