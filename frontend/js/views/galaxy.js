@@ -1,197 +1,279 @@
-// galaxy.js v2 — Light theme, shaded cube faces, CRUD context menu
+/* ═══════════════════════════════════════════
+   GALAXY — 3-D subject cloud (Three.js)
+   FIX: fully workspace-scoped, subjects isolated per workspace
+═══════════════════════════════════════════ */
 import * as THREE from 'three';
-import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import Store from '../core/store.js';
-import Router from '../core/router.js';
-import Events from '../core/events.js';
-import { openAddSubjectModal, openEditSubjectModal, openConfirmModal } from '../ui/modal.js';
+import { getSubjects, createSubject, deleteSubject, PALETTE } from '../core/store.js';
+import { emit } from '../core/events.js';
+import { openModal } from '../ui/modal.js';
 
-let scene, camera, renderer, labelRenderer, controls;
-let animId=null, cubeGroups=new Map(), hitMeshes=[], linkLines=[];
-let hovered=null;
-const CS=1.2; // cube size
+let renderer, labelRenderer, scene, camera, controls, animId;
+let _wsId = null;
+let cubes = [];   // { mesh, subjectId }
+const raycaster  = new THREE.Raycaster();
+const pointer    = new THREE.Vector2();
+let   hovered    = null;
+let   ctxTarget  = null;
 
-export function initGalaxy(container, workspaceId) {
-  if(renderer){ destroyGalaxy(); }
+const COLORS = PALETTE;
 
-  // Scene — light background
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xF0F1F3);
-  scene.fog = new THREE.FogExp2(0xF0F1F3, 0.012);
+// ── Subject position distribution ─────────────────────────────────────────
+function subjectPosition(idx, total) {
+  if (total <= 1) return new THREE.Vector3(0, 0, 0);
+  const φ = Math.acos(1 - 2*(idx+0.5)/total);
+  const θ = Math.PI * (1 + Math.sqrt(5)) * idx;
+  const r = 5 + Math.min(total*0.4, 8);
+  return new THREE.Vector3(
+    r * Math.sin(φ) * Math.cos(θ),
+    r * Math.cos(φ),
+    r * Math.sin(φ) * Math.sin(θ)
+  );
+}
 
-  // Floating particles
-  const pGeo = new THREE.BufferGeometry();
-  const pPos = new Float32Array(3000);
-  for(let i=0;i<3000;i++) pPos[i]=(Math.random()-0.5)*80;
-  pGeo.setAttribute('position',new THREE.BufferAttribute(pPos,3));
-  scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({color:0xC4C4CC,size:0.06,transparent:true,opacity:0.7})));
+export function initGalaxy(wsId) {
+  _wsId = wsId;
+  const container = document.getElementById('galaxy-container');
+  container.innerHTML = '';
+  cubes = [];
 
-  // Lighting
-  scene.add(new THREE.AmbientLight(0xffffff,0.8));
-  const dl = new THREE.DirectionalLight(0xffffff,0.6);
-  dl.position.set(10,20,15); scene.add(dl);
-  const dl2 = new THREE.DirectionalLight(0x8888ff,0.3);
-  dl2.position.set(-10,-5,-15); scene.add(dl2);
-
-  const W=container.clientWidth, H=container.clientHeight;
-  camera = new THREE.PerspectiveCamera(55,W/H,0.1,300);
-  camera.position.set(0,5,18);
-
-  renderer = new THREE.WebGLRenderer({antialias:true,alpha:false});
-  renderer.setSize(W,H); renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-  renderer.shadowMap.enabled=true;
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setClearColor(0x0A0B0E, 1);
   container.appendChild(renderer.domElement);
 
+  // Label renderer
   labelRenderer = new CSS2DRenderer();
-  labelRenderer.setSize(W,H);
-  labelRenderer.domElement.style.cssText='position:absolute;top:0;left:0;pointer-events:none;';
+  labelRenderer.setSize(container.clientWidth, container.clientHeight);
+  labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
   container.appendChild(labelRenderer.domElement);
 
+  // Scene
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0A0B0E, 0.018);
+
+  // Camera
+  camera = new THREE.PerspectiveCamera(55, container.clientWidth/container.clientHeight, 0.1, 500);
+  camera.position.set(0, 4, 20);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  dLight.position.set(10, 20, 10);
+  scene.add(dLight);
+  const pLight = new THREE.PointLight(0x7C3AED, 2, 50);
+  pLight.position.set(0, 10, 0);
+  scene.add(pLight);
+
+  // Stars
+  addStars();
+
+  // Controls
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping=true; controls.dampingFactor=0.06;
-  controls.minDistance=4; controls.maxDistance=60;
-  controls.autoRotate=true; controls.autoRotateSpeed=0.35;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.minDistance   = 4;
+  controls.maxDistance   = 60;
 
-  rebuildGalaxy(workspaceId);
+  // Build subjects (workspace-scoped)
+  rebuildScene();
 
-  renderer.domElement.addEventListener('click', e=>onGalaxyClick(e,workspaceId));
-  renderer.domElement.addEventListener('mousemove', onGalaxyHover);
-  renderer.domElement.addEventListener('contextmenu', e=>onGalaxyCtx(e,workspaceId));
-  window.addEventListener('resize',()=>onResize(container));
-  Events.on('subjects:changed', ()=>rebuildGalaxy(workspaceId));
+  // Events
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('click',       onClick);
+  renderer.domElement.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('resize', onResize);
 
-  startLoop();
+  // Animate
+  if (animId) cancelAnimationFrame(animId);
+  animate();
 }
 
-export function destroyGalaxy() {
-  stopLoop();
-  Events.off('subjects:changed',()=>{});
-  cubeGroups.clear(); hitMeshes=[]; linkLines=[];
+function addStars() {
+  const geo = new THREE.BufferGeometry();
+  const cnt = 800;
+  const pos = new Float32Array(cnt * 3);
+  for (let i = 0; i < cnt*3; i++) pos[i] = (Math.random()-0.5)*300;
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color: 0x8B8FA8, size: 0.15, transparent: true, opacity: 0.6 });
+  scene.add(new THREE.Points(geo, mat));
 }
 
-/* ── Build scene ───────────────────────────── */
-function rebuildGalaxy(workspaceId) {
-  cubeGroups.forEach(g=>scene.remove(g));
-  cubeGroups.clear(); hitMeshes=[]; linkLines.forEach(l=>scene.remove(l)); linkLines=[];
-  const subjects = Store.getSubjects(workspaceId);
-  subjects.forEach(s=>{ const g=buildCube(s); scene.add(g); cubeGroups.set(s.id,g); });
-  buildLinks();
-}
+export function rebuildScene() {
+  // Remove old cubes
+  cubes.forEach(c => { scene.remove(c.mesh); c.label?.element?.parentNode?.removeChild(c.label.element); });
+  cubes = [];
 
-function buildCube(subj) {
-  const group = new THREE.Group();
-  const [px,py,pz] = subj.position||[0,0,0];
-  group.position.set(px,py,pz);
+  // Only subjects for current workspace
+  const subjects = getSubjects(_wsId);
+  subjects.forEach((sub, idx) => {
+    const pos  = subjectPosition(idx, subjects.length);
+    const col  = parseInt(sub.color.replace('#',''), 16);
 
-  const color = new THREE.Color(subj.color||'#7C3AED');
+    // Geometry: glowing cube
+    const geo  = new THREE.BoxGeometry(1.6, 1.6, 1.6);
+    const mat  = new THREE.MeshStandardMaterial({
+      color: col, transparent: true, opacity: 0.85,
+      roughness: 0.3, metalness: 0.5,
+      emissive: col, emissiveIntensity: 0.15
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    mesh.userData = { subjectId: sub.id, color: col, baseEmissive: 0.15 };
+    scene.add(mesh);
 
-  // Shaded faces (6 materials, different opacity per face for depth)
-  const faceGeo = new THREE.BoxGeometry(CS,CS,CS);
-  const faceOpacities = [0.20, 0.12, 0.28, 0.08, 0.22, 0.14]; // +x,-x,+y,-y,+z,-z
-  const faceMats = faceOpacities.map(o=>
-    new THREE.MeshLambertMaterial({color, transparent:true, opacity:o, side:THREE.FrontSide})
-  );
-  group.add(new THREE.Mesh(faceGeo, faceMats));
+    // Wire frame
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geo),
+      new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.5 })
+    );
+    mesh.add(edges);
 
-  // Wireframe edges
-  const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(CS,CS,CS));
-  const edgeMat = new THREE.LineBasicMaterial({color, linewidth:1.5});
-  const wire    = new THREE.LineSegments(edgeGeo, edgeMat);
-  group.add(wire);
+    // Label
+    const div = document.createElement('div');
+    div.className = 'subject-label';
+    div.innerHTML = `<div class="subject-label-inner" style="color:${sub.color};border-color:${sub.color}40">${sub.name}</div>`;
+    const lbl = new CSS2DObject(div);
+    lbl.position.set(0, -1.4, 0);
+    mesh.add(lbl);
 
-  // Center glow sphere
-  const sphere = new THREE.Mesh(
-    new THREE.SphereGeometry(0.15,16,16),
-    new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.8})
-  );
-  group.add(sphere);
-
-  // Invisible hit mesh
-  const hitMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(CS*1.15,CS*1.15,CS*1.15),
-    new THREE.MeshBasicMaterial({visible:false})
-  );
-  hitMesh.userData = {subjectId:subj.id, wire, edgeMat, origColor:color.clone()};
-  group.add(hitMesh); hitMeshes.push(hitMesh);
-
-  // Label
-  const div = document.createElement('div');
-  div.className='subject-label';
-  div.innerHTML=`<div class="subject-label-inner" style="color:${subj.color}">${subj.label}<span style="font-weight:400;margin-left:4px;color:#71717A;font-size:9px">${subj.name}</span></div>`;
-  const lbl = new CSS2DObject(div);
-  lbl.position.set(0,CS*0.82,0); group.add(lbl);
-
-  group.userData={subjectId:subj.id};
-  return group;
-}
-
-function buildLinks() {
-  Store.getSubjectPairs().forEach(([aId,bId])=>{
-    const ga=cubeGroups.get(aId), gb=cubeGroups.get(bId);
-    if(!ga||!gb) return;
-    const pts=[ga.position.clone(),gb.position.clone()];
-    const geo=new THREE.BufferGeometry().setFromPoints(pts);
-    const mat=new THREE.LineDashedMaterial({color:0x7C3AED,dashSize:0.35,gapSize:0.2,transparent:true,opacity:0.35});
-    const ln=new THREE.Line(geo,mat); ln.computeLineDistances();
-    scene.add(ln); linkLines.push(ln);
+    cubes.push({ mesh, subjectId: sub.id, label: lbl });
   });
 }
 
-/* ── Interaction ───────────────────────────── */
-const raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
-function getPtr(e,el){ const r=el.getBoundingClientRect(); mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1; }
-
-function onGalaxyClick(e, workspaceId) {
-  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
-  const hits=raycaster.intersectObjects(hitMeshes);
-  if(hits.length>0){ controls.autoRotate=false; Router.goCube(hits[0].object.userData.subjectId); }
+function animate() {
+  animId = requestAnimationFrame(animate);
+  const t = Date.now()*0.001;
+  cubes.forEach((c, i) => {
+    c.mesh.rotation.x = Math.sin(t*0.4 + i)*0.12;
+    c.mesh.rotation.y = t*0.3 + i*1.2;
+    if (c.mesh === hovered) {
+      c.mesh.material.emissiveIntensity = 0.5 + Math.sin(t*4)*0.2;
+      c.mesh.scale.setScalar(1 + Math.sin(t*3)*0.02);
+    } else {
+      c.mesh.material.emissiveIntensity = 0.15;
+      c.mesh.scale.setScalar(1);
+    }
+  });
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
 }
 
-function onGalaxyHover(e) {
-  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
-  if(hovered){ hovered.userData.edgeMat.color.copy(hovered.userData.origColor); hovered=null; renderer.domElement.style.cursor='default'; }
-  const hits=raycaster.intersectObjects(hitMeshes);
-  if(hits.length>0){ hovered=hits[0].object; hovered.userData.edgeMat.color.set(0x000000); renderer.domElement.style.cursor='pointer'; }
+function getIntersected(event) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+  pointer.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const meshes = cubes.map(c => c.mesh);
+  const hits   = raycaster.intersectObjects(meshes, false);
+  return hits.length ? hits[0].object : null;
 }
 
-function onGalaxyCtx(e, workspaceId) {
+function onPointerMove(e) {
+  hovered = getIntersected(e);
+  renderer.domElement.style.cursor = hovered ? 'pointer' : 'default';
+}
+
+function onClick(e) {
+  const mesh = getIntersected(e);
+  if (!mesh) return;
+  const { subjectId } = mesh.userData;
+  emit('nav:subject', { wsId: _wsId, subjectId });
+}
+
+function onContextMenu(e) {
   e.preventDefault();
-  getPtr(e,renderer.domElement); raycaster.setFromCamera(mouse,camera);
-  const hits=raycaster.intersectObjects(hitMeshes);
-  const subjectId = hits.length>0 ? hits[0].object.userData.subjectId : null;
-
-  const items = subjectId ? [
-    {icon:'✏️', label:'Edit Subject',  action:()=>openEditSubjectModal(subjectId)},
-    {sep:true},
-    {icon:'🗑️', label:'Delete Subject', danger:true, action:()=>openConfirmModal({
-      title:'Delete Subject', confirmText:'Delete',
-      message:`Delete "<b>${Store.getSubject(subjectId)?.name}</b>"? All units and nodes inside will also be removed.`,
-      onConfirm:()=>{ Store.deleteSubject(subjectId); Events.emit('subjects:changed'); }
-    })},
-  ] : [
-    {icon:'➕', label:'Add Subject', action:()=>openAddSubjectModal(workspaceId)},
-  ];
-  showCtxMenu(e.clientX, e.clientY, items);
+  const mesh = getIntersected(e);
+  if (!mesh) return;
+  ctxTarget = mesh.userData.subjectId;
+  showCtxMenu(e.clientX, e.clientY);
 }
 
-/* ── Loop ──────────────────────────────────── */
-function startLoop() {
-  if(animId!==null) return;
-  function tick(){ animId=requestAnimationFrame(tick); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); }
-  tick();
+function showCtxMenu(x, y) {
+  const menu = document.getElementById('ctxMenu');
+  menu.style.cssText = `display:block;left:${x}px;top:${y}px`;
+  menu.innerHTML = `
+    <div class="ctx-item" id="ctxEnter">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+      Enter Subject
+    </div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item danger" id="ctxDelete">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+      Delete Subject
+    </div>`;
+  menu.querySelector('#ctxEnter').onclick = () => {
+    hideCtxMenu();
+    emit('nav:subject', { wsId: _wsId, subjectId: ctxTarget });
+  };
+  menu.querySelector('#ctxDelete').onclick = () => {
+    hideCtxMenu();
+    const sub = getSubjects(_wsId).find(s => s.id === ctxTarget);
+    openModal({
+      title: 'Delete Subject',
+      body: `<p style="color:var(--text-muted);font-size:13px">Delete <strong>${sub?.name||'this subject'}</strong> and all its nodes? This cannot be undone.</p>`,
+      confirmText: 'Delete', confirmDanger: true,
+      onConfirm: () => { deleteSubject(ctxTarget); rebuildScene(); }
+    });
+  };
 }
-function stopLoop() { if(animId!==null) cancelAnimationFrame(animId); animId=null; }
-function onResize(c) { const W=c.clientWidth,H=c.clientHeight; camera.aspect=W/H; camera.updateProjectionMatrix(); renderer.setSize(W,H); labelRenderer.setSize(W,H); }
+function hideCtxMenu() { document.getElementById('ctxMenu').style.display='none'; }
+document.addEventListener('click', hideCtxMenu);
 
-/* ── Context menu helper ───────────────────── */
-function showCtxMenu(x,y,items) {
-  const el=document.getElementById('ctxMenu');
-  el.innerHTML=items.map((it,i)=>it.sep?`<div class="ctx-sep"></div>`:
-    `<div class="ctx-item${it.danger?' danger':''}" data-i="${i}">${it.icon||''} ${it.label}</div>`
+function onResize() {
+  const c = document.getElementById('galaxy-container');
+  if (!c || !renderer) return;
+  camera.aspect = c.clientWidth / c.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(c.clientWidth, c.clientHeight);
+  labelRenderer.setSize(c.clientWidth, c.clientHeight);
+}
+
+export function openAddSubjectModal(wsId) {
+  let chosenColor = PALETTE[Math.floor(Math.random()*PALETTE.length)];
+  const swatches = PALETTE.map(c =>
+    `<button class="color-swatch${c===chosenColor?' selected':''}" data-color="${c}" style="background:${c}"></button>`
   ).join('');
-  el.style.display='block'; el.style.left=`${Math.min(x,window.innerWidth-180)}px`; el.style.top=`${Math.min(y,window.innerHeight-100)}px`;
-  el.querySelectorAll('.ctx-item').forEach(el2=>{ const i=+el2.dataset.i; if(!isNaN(i)&&items[i]) el2.addEventListener('click',()=>{items[i].action?.(); el.style.display='none';}); });
+
+  openModal({
+    title: 'Add Subject',
+    body: `
+      <div class="form-group">
+        <label class="form-label">Subject Name</label>
+        <input class="form-input" id="subNameInput" placeholder="e.g. Quantum Physics" autofocus/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Color</label>
+        <div class="color-swatch-grid">${swatches}</div>
+      </div>`,
+    confirmText: 'Add Subject',
+    onConfirm: () => {
+      const name = document.getElementById('subNameInput')?.value?.trim();
+      if (!name) return false;
+      createSubject(wsId, name, chosenColor);
+      rebuildScene();
+    }
+  });
+
+  setTimeout(() => {
+    document.querySelectorAll('.color-swatch[data-color]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.color-swatch[data-color]').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        chosenColor = btn.dataset.color;
+      });
+    });
+  }, 0);
 }
 
-export {rebuildGalaxy};
+export function destroyGalaxy() {
+  if (animId) cancelAnimationFrame(animId);
+  renderer?.dispose();
+  const c = document.getElementById('galaxy-container');
+  if (c) c.innerHTML = '';
+  window.removeEventListener('resize', onResize);
+}

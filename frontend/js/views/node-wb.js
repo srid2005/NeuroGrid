@@ -1,269 +1,246 @@
-// node-wb.js v2 — Fixed Konva timing, light theme, all tools working
-import Store from '../core/store.js';
-import Router from '../core/router.js';
-import Events from '../core/events.js';
+/* ═══════════════════════════════════════════
+   NODE WHITEBOARD — per-node canvas + sidebar
+═══════════════════════════════════════════ */
+import {
+  getNode, updateNode, getSubject, getUnit,
+  getEdges, getEdge, deleteEdge,
+  getCrossEdgesForNode, deleteCrossEdge, getNode as gn,
+  getAllNodesForWorkspace
+} from '../core/store.js';
+import { emit } from '../core/events.js';
+import { openModal } from '../ui/modal.js';
+import { openCrossLinkModal } from './cross-link.js';
 
-const K = () => window.Konva;
-let stage, bgLayer, mainLayer, uiLayer, transformer;
-let currentTool='select', currentColor='#7C3AED', currentWidth=2;
-let isPainting=false, activeShape=null, rectStart=null;
-let undoStack=[], redoStack=[], _nodeId=null, saveTimer=null;
+let _wsId=null, _subjectId=null, _unitId=null, _nodeId=null;
+let _canvas=null, _ctx=null;
+let _drawing=false, _tool='pen', _color='#A78BFA', _size=2;
+let _history=[], _redoStack=[];
 
-export function initNodeWb(nodeId) {
-  _nodeId = nodeId;
-  // Double rAF ensures DOM has fully laid out before measuring
-  requestAnimationFrame(() => requestAnimationFrame(() => _setup(nodeId)));
-}
+export function initNodeWb(wsId, subjectId, unitId, nodeId) {
+  _wsId=wsId; _subjectId=subjectId; _unitId=unitId; _nodeId=nodeId;
 
-function _setup(nodeId) {
-  const wrap = document.getElementById('nodeCanvasWrap');
-  if (!wrap) return;
-  if (stage) { stage.destroy(); stage = null; }
-
-  const W = wrap.clientWidth  || window.innerWidth  - 268;
-  const H = wrap.clientHeight || window.innerHeight - 52 - 48;
-
-  stage = new (K().Stage)({ container: 'nodeCanvas', width: W, height: H });
-  bgLayer   = new (K().Layer)();
-  mainLayer = new (K().Layer)();
-  uiLayer   = new (K().Layer)();
-  stage.add(bgLayer, mainLayer, uiLayer);
-
-  drawGrid(W, H);
-
-  transformer = new (K().Transformer)({
-    borderStroke: '#7C3AED', anchorStroke: '#7C3AED',
-    anchorFill: '#fff', anchorSize: 8,
-    rotationSnaps: [0,45,90,135,180,225,270,315],
-  });
-  uiLayer.add(transformer);
-
-  const node = Store.getNode(nodeId);
-  if (node?.whiteboardData?.length) restoreState(node.whiteboardData);
-  undoStack = [getState()]; redoStack = [];
-
-  bindEvents();
-  populateSidebar(nodeId);
-  window.addEventListener('resize', () => onResize(wrap));
-}
-
-/* ── Grid ─────────────────────── */
-function drawGrid(W, H) {
-  bgLayer.destroyChildren();
-  bgLayer.add(new (K().Rect)({ x:0, y:0, width:W, height:H, fill:'#F7F7F8', listening:false }));
-  const gap=28, c='#E0E0E4';
-  for (let x=gap; x<W; x+=gap)
-    for (let y=gap; y<H; y+=gap)
-      bgLayer.add(new (K().Circle)({ x, y, radius:1, fill:c, listening:false }));
-  bgLayer.batchDraw();
-}
-
-/* ── Events ────────────────────── */
-function bindEvents() {
-  // Zoom
-  stage.on('wheel', e => {
-    e.evt.preventDefault();
-    const by=1.08, ptr=stage.getPointerPosition(), old=stage.scaleX();
-    const nw=Math.max(0.1, Math.min(5, e.evt.deltaY<0 ? old*by : old/by));
-    stage.scale({x:nw,y:nw});
-    stage.position({ x:ptr.x-(ptr.x-stage.x())*(nw/old), y:ptr.y-(ptr.y-stage.y())*(nw/old) });
-    stage.batchDraw();
-  });
-
-  stage.on('mousedown touchstart', e => {
-    const pos = scaledPos(); if (!pos) return;
-    if (currentTool==='pen')    { startPen(pos); }
-    if (currentTool==='rect')   { startRect(pos); }
-    if (currentTool==='circle') { startCircle(pos); }
-    if (currentTool==='text')   { addText(pos); }
-    if (currentTool==='eraser') { eraseTarget(e); }
-    if (currentTool==='select' && e.target===stage) { transformer.nodes([]); uiLayer.batchDraw(); }
-  });
-
-  stage.on('mousemove touchmove', e => {
-    if (!isPainting) return;
-    e.evt.preventDefault();
-    const pos = scaledPos(); if (!pos) return;
-    if (currentTool==='pen')    continuePen(pos);
-    if (currentTool==='rect')   continueRect(pos);
-    if (currentTool==='circle') continueCircle(pos);
-  });
-
-  stage.on('mouseup touchend', () => {
-    if (isPainting) { isPainting=false; activeShape=null; rectStart=null; pushUndo(); scheduleSave(); }
-  });
-
-  stage.on('click tap', e => {
-    if (currentTool!=='select' || e.target===stage) return;
-    transformer.nodes([e.target]); uiLayer.batchDraw();
-  });
-
-  window.addEventListener('keydown', onKey);
-}
-
-function scaledPos() {
-  const p=stage.getPointerPosition(); if (!p) return null;
-  const s=stage.scaleX();
-  return { x:(p.x-stage.x())/s, y:(p.y-stage.y())/s };
-}
-
-/* ── Tools ─────────────────────── */
-function startPen(pos) {
-  isPainting=true;
-  activeShape = new (K().Line)({
-    points:[pos.x,pos.y], stroke:currentColor, strokeWidth:currentWidth,
-    tension:0.4, lineCap:'round', lineJoin:'round', draggable:true,
-  });
-  mainLayer.add(activeShape);
-}
-function continuePen(pos) { activeShape.points(activeShape.points().concat([pos.x,pos.y])); mainLayer.batchDraw(); }
-
-function startRect(pos) {
-  isPainting=true; rectStart={...pos};
-  activeShape = new (K().Rect)({
-    x:pos.x, y:pos.y, width:0, height:0,
-    stroke:currentColor, strokeWidth:currentWidth,
-    fill:currentColor+'18', cornerRadius:4, draggable:true,
-  });
-  mainLayer.add(activeShape);
-}
-function continueRect(pos) { activeShape.width(pos.x-rectStart.x); activeShape.height(pos.y-rectStart.y); mainLayer.batchDraw(); }
-
-function startCircle(pos) {
-  isPainting=true; rectStart={...pos};
-  activeShape = new (K().Ellipse)({
-    x:pos.x, y:pos.y, radiusX:0, radiusY:0,
-    stroke:currentColor, strokeWidth:currentWidth, fill:currentColor+'18', draggable:true,
-  });
-  mainLayer.add(activeShape);
-}
-function continueCircle(pos) {
-  activeShape.radiusX(Math.abs(pos.x-rectStart.x));
-  activeShape.radiusY(Math.abs(pos.y-rectStart.y));
-  mainLayer.batchDraw();
-}
-
-function addText(pos) {
-  const text = new (K().Text)({
-    x:pos.x, y:pos.y, text:'Double-click to edit',
-    fontSize:14, fill:currentColor,
-    fontFamily:'Inter, system-ui, sans-serif', draggable:true,
-  });
-  mainLayer.add(text); mainLayer.batchDraw();
-  pushUndo(); scheduleSave();
-
-  text.on('dblclick dbltap', () => {
-    text.hide(); mainLayer.batchDraw();
-    const cRect=stage.container().getBoundingClientRect();
-    const ap=text.absolutePosition();
-    const sc=stage.scaleX();
-    const ta=document.createElement('textarea');
-    Object.assign(ta.style, {
-      position:'fixed', left:(cRect.left+ap.x)+'px', top:(cRect.top+ap.y)+'px',
-      minWidth:'120px', fontSize:(14*sc)+'px', border:'1px solid #7C3AED',
-      borderRadius:'4px', padding:'2px 6px', background:'#fff',
-      color:currentColor, fontFamily:'Inter,system-ui,sans-serif',
-      outline:'none', zIndex:'999', boxShadow:'0 2px 8px rgba(0,0,0,0.12)',
-    });
-    ta.value=text.text(); document.body.appendChild(ta); ta.focus(); ta.select();
-    const done=()=>{ text.text(ta.value||' '); text.show(); ta.remove(); mainLayer.batchDraw(); pushUndo(); scheduleSave(); };
-    ta.addEventListener('keydown', e=>{ if(e.key==='Escape') done(); });
-    ta.addEventListener('blur', done);
-  });
-  text.on('click tap', () => { if(currentTool==='select'){ transformer.nodes([text]); uiLayer.batchDraw(); } });
-}
-
-function eraseTarget(e) {
-  if (e.target!==stage) { e.target.destroy(); mainLayer.batchDraw(); pushUndo(); scheduleSave(); }
-}
-
-/* ── Undo / Redo ──────────────── */
-function getState() {
-  return mainLayer.getChildren().map(n => ({ cls:n.getClassName(), attrs:n.getAttrs() }));
-}
-function applyState(state) {
-  mainLayer.destroyChildren();
-  state.forEach(({cls,attrs}) => {
-    const S=K()[cls]; if(!S) return;
-    const shape=new S({...attrs,draggable:true});
-    mainLayer.add(shape);
-    if (cls==='Text') {
-      shape.on('dblclick dbltap', () => addText(shape.position()));
-      shape.on('click tap', () => { if(currentTool==='select'){ transformer.nodes([shape]); uiLayer.batchDraw(); } });
-    }
-  });
-  transformer.nodes([]); mainLayer.batchDraw(); uiLayer.batchDraw();
-}
-function pushUndo() { undoStack.push(getState()); redoStack=[]; if(undoStack.length>80) undoStack.shift(); }
-
-export function undoNodeWb() { if(undoStack.length<=1) return; redoStack.push(undoStack.pop()); applyState(undoStack[undoStack.length-1]); scheduleSave(); }
-export function redoNodeWb() { if(!redoStack.length) return; const s=redoStack.pop(); undoStack.push(s); applyState(s); scheduleSave(); }
-export function clearNodeWb() { pushUndo(); mainLayer.destroyChildren(); mainLayer.batchDraw(); scheduleSave(); }
-
-/* ── Save / Restore ───────────── */
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer=setTimeout(()=>{ if(_nodeId) Store.updateNode(_nodeId,{whiteboardData:getState()}); }, 600);
-}
-function restoreState(data) { applyState(data); }
-
-/* ── Sidebar ──────────────────── */
-function populateSidebar(nodeId) {
-  const node=Store.getNode(nodeId), subj=Store.getSubject(node?.subjectId);
+  const node = getNode(nodeId);
   if (!node) return;
-  const badge=document.getElementById('nodeSubjectBadge');
-  badge.textContent=subj?.label||'?';
-  badge.style.cssText=`background:${subj?.color||'#7C3AED'}15;color:${subj?.color||'#7C3AED'};border:1px solid ${subj?.color||'#7C3AED'}40;`;
-  document.getElementById('nodeTitle').textContent=node.label;
-  document.getElementById('nodeUnit').textContent=node.unitId?`Unit: ${Store.getUnit(node.unitId)?.name||''}` : '';
-  const notesEl=document.getElementById('nodeNotesInput');
-  notesEl.value=node.notes||'';
-  notesEl.oninput=()=>Store.updateNode(nodeId,{notes:notesEl.value});
-  renderConnList(nodeId);
+
+  // Update toolbar breadcrumb title
+  document.getElementById('nodeWbTitle').textContent = node.name;
+
+  // Setup canvas
+  _canvas = document.getElementById('nodeCanvas');
+  _ctx    = _canvas.getContext('2d');
+  resizeCanvas();
+  if (node.canvasData) {
+    const img = new Image();
+    img.onload = () => _ctx.drawImage(img, 0, 0);
+    img.src = node.canvasData;
+  } else {
+    clearCanvas();
+  }
+
+  // Setup sidebar
+  renderNodeSidebar(node);
+
+  // Canvas events
+  _canvas.addEventListener('pointerdown', onDown);
+  _canvas.addEventListener('pointermove', onMove);
+  _canvas.addEventListener('pointerup',   onUp);
+  _canvas.addEventListener('pointerleave',onUp);
+  window.addEventListener('resize', resizeCanvas);
+
+  // Toolbar events
+  setupToolbar();
 }
 
-function renderConnList(nodeId) {
-  const list=document.getElementById('nodeConnList');
-  const edges=Store.getNodeEdges(nodeId);
-  list.innerHTML='';
-  if (!edges.length) { list.innerHTML='<div class="conn-empty">No connections yet.<br>Use Link Mode in the cube view.</div>'; return; }
-  edges.forEach(edge=>{
-    const otherId=edge.fromId===nodeId?edge.toId:edge.fromId;
-    const on=Store.getNode(otherId), os=Store.getSubject(on?.subjectId);
-    if (!on) return;
-    const item=document.createElement('div'); item.className='conn-item';
-    item.innerHTML=`<div class="conn-dot" style="background:${os?.color||'#7C3AED'}"></div>
-      <div class="conn-info"><div class="conn-name">${on.label}</div><div class="conn-rel">${edge.relationship}</div></div>
-      ${edge.isCross?`<span class="conn-cross">${os?.label}</span>`:''}`;
-    item.addEventListener('click',()=>Router.goEdgeWb(edge.id));
-    list.appendChild(item);
-  });
-}
-
-/* ── Public setters ───────────── */
-export function setNodeTool(t)  { currentTool=t; if(t!=='select') transformer.nodes([]); uiLayer?.batchDraw(); }
-export function setNodeColor(c) { currentColor=c; }
-export function setNodeWidth(w) { currentWidth=w; }
-
-function onKey(e) {
-  if (Router.current!=='nodeWb') return;
-  if (document.activeElement?.tagName==='TEXTAREA'||document.activeElement?.tagName==='INPUT') return;
-  if ((e.ctrlKey||e.metaKey)&&e.key==='z') { e.preventDefault(); undoNodeWb(); }
-  if ((e.ctrlKey||e.metaKey)&&(e.key==='y'||e.key==='Y')) { e.preventDefault(); redoNodeWb(); }
-  if ((e.key==='Delete'||e.key==='Backspace')&&transformer) {
-    transformer.nodes().forEach(n=>n.destroy()); transformer.nodes([]);
-    mainLayer.batchDraw(); pushUndo(); scheduleSave();
+function resizeCanvas() {
+  if (!_canvas) return;
+  const wrap = _canvas.parentElement;
+  const data = _canvas.toDataURL();
+  _canvas.width  = wrap.clientWidth;
+  _canvas.height = wrap.clientHeight;
+  if (_history.length) {
+    const img = new Image();
+    img.onload = () => _ctx.drawImage(img, 0, 0);
+    img.src = data;
+  } else {
+    clearCanvas();
   }
 }
 
-function onResize(wrap) {
-  if (!stage) return;
-  const W=wrap.clientWidth, H=wrap.clientHeight;
-  stage.width(W); stage.height(H); drawGrid(W,H);
+function clearCanvas() {
+  if (!_ctx || !_canvas) return;
+  _ctx.fillStyle = '#0A0B0E';
+  _ctx.fillRect(0, 0, _canvas.width, _canvas.height);
+}
+
+function setupToolbar() {
+  document.querySelectorAll('#nodeWbToolbar .tool-btn[data-tool]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#nodeWbToolbar .tool-btn[data-tool]').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      _tool = btn.dataset.tool;
+      _canvas.style.cursor = _tool==='eraser'?'cell':'crosshair';
+    });
+  });
+  document.querySelectorAll('#nodeWbToolbar .stroke-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#nodeWbToolbar .stroke-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      _size = +btn.dataset.size;
+    });
+  });
+  const cp = document.getElementById('nodeColorPicker');
+  if (cp) cp.addEventListener('input', e => { _color = e.target.value; });
+  document.getElementById('nodeUndoBtn')?.addEventListener('click', undo);
+  document.getElementById('nodeRedoBtn')?.addEventListener('click', redo);
+  document.getElementById('nodeClearBtn')?.addEventListener('click', () => {
+    openModal({
+      title:'Clear Canvas',
+      body:'<p style="color:var(--text-muted);font-size:13px">Clear all drawing on this canvas?</p>',
+      confirmText:'Clear',confirmDanger:true,
+      onConfirm:()=>{ clearCanvas(); saveCanvas(); }
+    });
+  });
+}
+
+function onDown(e) {
+  _drawing = true;
+  saveSnapshot();
+  _ctx.beginPath();
+  _ctx.moveTo(e.offsetX, e.offsetY);
+}
+function onMove(e) {
+  if (!_drawing) return;
+  _ctx.lineWidth   = _tool==='eraser' ? _size*6 : _size;
+  _ctx.lineCap     = 'round';
+  _ctx.lineJoin    = 'round';
+  _ctx.strokeStyle = _tool==='eraser' ? '#0A0B0E' : _color;
+  _ctx.lineTo(e.offsetX, e.offsetY);
+  _ctx.stroke();
+}
+function onUp() {
+  _drawing = false;
+  saveCanvas();
+}
+function saveSnapshot() {
+  _history.push(_canvas.toDataURL());
+  if (_history.length > 40) _history.shift();
+  _redoStack = [];
+}
+function undo() {
+  if (!_history.length) return;
+  _redoStack.push(_canvas.toDataURL());
+  const prev = _history.pop();
+  const img = new Image();
+  img.onload = () => { clearCanvas(); _ctx.drawImage(img,0,0); };
+  img.src = prev;
+}
+function redo() {
+  if (!_redoStack.length) return;
+  _history.push(_canvas.toDataURL());
+  const next = _redoStack.pop();
+  const img = new Image();
+  img.onload = () => { clearCanvas(); _ctx.drawImage(img,0,0); };
+  img.src = next;
+}
+function saveCanvas() {
+  updateNode(_nodeId, { canvasData: _canvas.toDataURL('image/jpeg', 0.7) });
+}
+
+function renderNodeSidebar(node) {
+  const sub  = getSubject(node.subjectId);
+  const unit = node.unitId ? getUnit(node.unitId) : null;
+
+  // Badge + title
+  document.getElementById('nicBadge').style.cssText = `background:${node.color}22;color:${node.color};border:1px solid ${node.color}44`;
+  document.getElementById('nicBadge').textContent   = sub?.name || 'Node';
+  document.getElementById('nicTitle').textContent   = node.name;
+  document.getElementById('nicUnit').textContent    = unit ? `SubCube: ${unit.name}` : 'Subject level';
+
+  // Notes
+  const notesEl = document.getElementById('nodeNotes');
+  notesEl.value = node.notes || '';
+  notesEl.oninput = () => updateNode(_nodeId, { notes: notesEl.value });
+
+  // Connections
+  renderConnections(node);
+}
+
+function renderConnections(node) {
+  const list = document.getElementById('connList');
+  list.innerHTML = '';
+
+  // Same-layer edges
+  const edges = getEdges(node.subjectId, node.unitId);
+  const myEdges = edges.filter(e => e.fromNodeId===node.id || e.toNodeId===node.id);
+  myEdges.forEach(edge => {
+    const otherId = edge.fromNodeId===node.id ? edge.toNodeId : edge.fromNodeId;
+    const other   = getNode(otherId);
+    if (!other) return;
+    const item = makeConnItem(other, edge.label||'linked', false, () => {
+      openModal({
+        title:'Remove Connection',
+        body:`<p style="color:var(--text-muted);font-size:13px">Remove link to <strong>${esc(other.name)}</strong>?</p>`,
+        confirmText:'Remove',confirmDanger:true,
+        onConfirm:()=>{ deleteEdge(edge.id); renderConnections(getNode(_nodeId)); }
+      });
+    });
+    list.appendChild(item);
+  });
+
+  // Cross-layer edges
+  const crossEdges = getCrossEdgesForNode(node.id);
+  crossEdges.forEach(edge => {
+    const otherId = edge.fromNodeId===node.id ? edge.toNodeId : edge.fromNodeId;
+    const other   = getNode(otherId);
+    if (!other) return;
+    const item = makeConnItem(other, edge.label||'cross-link', true, () => {
+      openModal({
+        title:'Remove Cross-Link',
+        body:`<p style="color:var(--text-muted);font-size:13px">Remove cross-layer link to <strong>${esc(other.name)}</strong>?</p>`,
+        confirmText:'Remove',confirmDanger:true,
+        onConfirm:()=>{ deleteCrossEdge(edge.id); renderConnections(getNode(_nodeId)); }
+      });
+    });
+    list.appendChild(item);
+  });
+
+  if (!list.children.length) {
+    list.innerHTML = '<div class="conn-empty">No connections yet.<br>Right-click a node in 3D to link.</div>';
+  }
+
+  // Add cross link button
+  const addCross = document.getElementById('addCrossLinkBtn');
+  if (addCross) {
+    addCross.onclick = () => openCrossLinkModal(_wsId, _nodeId, () => renderConnections(getNode(_nodeId)));
+  }
+}
+
+function makeConnItem(node, label, isCross, onDelete) {
+  const div = document.createElement('div');
+  div.className = 'conn-item';
+  div.innerHTML = `
+    <div class="conn-dot" style="background:${node.color}"></div>
+    <div class="conn-info">
+      <div class="conn-name">${esc(node.name)}</div>
+      <div class="conn-rel">${esc(label)}</div>
+    </div>
+    ${isCross?'<span class="conn-cross">cross</span>':''}
+    <button class="btn-icon danger-icon" title="Remove">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>`;
+  div.querySelector('button').addEventListener('click', e => { e.stopPropagation(); onDelete(); });
+  return div;
 }
 
 export function destroyNodeWb() {
-  window.removeEventListener('keydown', onKey);
-  if (stage) { stage.destroy(); stage=null; }
-  undoStack=[]; redoStack=[];
+  if (_canvas) {
+    _canvas.removeEventListener('pointerdown', onDown);
+    _canvas.removeEventListener('pointermove', onMove);
+    _canvas.removeEventListener('pointerup',   onUp);
+    _canvas.removeEventListener('pointerleave',onUp);
+  }
+  window.removeEventListener('resize', resizeCanvas);
+  _canvas=null; _ctx=null; _drawing=false;
 }
+
+function esc(s=''){return String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));}

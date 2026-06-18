@@ -1,279 +1,536 @@
-// cube.js v2 — Sub-cubes (units), fixed node positioning, cross-cube linking, context menu
+/* ═══════════════════════════════════════════
+   CUBE — subject interior (units as sub-cubes)
+   FIX: workspace isolation, free object movement,
+        link mode fixed, cross-layer links
+═══════════════════════════════════════════ */
 import * as THREE from 'three';
-import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
-import Store from '../core/store.js';
-import Router from '../core/router.js';
-import Events from '../core/events.js';
-import { openAddNodeModal, openAddUnitModal, openEditNodeModal, openConfirmModal, openCrossLinkModal } from '../ui/modal.js';
+import {
+  getSubject, getUnits, createUnit, deleteUnit,
+  getNodes, createNode, deleteNode,
+  getEdges, createEdge, deleteEdge,
+  getCrossEdgesForNode, getNode, getAllNodesForWorkspace,
+  PALETTE, uid
+} from '../core/store.js';
+import { emit } from '../core/events.js';
+import { openModal } from '../ui/modal.js';
+import { openCrossLinkModal } from './cross-link.js';
 
-let scene, camera, renderer, labelRenderer, controls;
-let animId=null, nodeMeshes=[], unitMeshes=[], edgeMidMeshes=[];
-let linkMode=false, linkFirst=null;
-const CH=1.0; // cube half
+let renderer, labelRenderer, scene, camera, controls, animId;
+let _wsId = null, _subjectId = null;
+let unitMeshes = [];   // { mesh, unitId }
+let nodeMeshes = [];   // { mesh, nodeId }
+let edgeLines  = [];
+let linkMode   = false;
+let linkSource = null;
+let dragging   = null;
+let dragPlane  = new THREE.Plane();
+let dragOffset = new THREE.Vector3();
+let hovered    = null;
+let ctxTarget  = null;
+const raycaster = new THREE.Raycaster();
+const pointer   = new THREE.Vector2();
+const _mouse    = new THREE.Vector2();
 
-export function initCube(container, subjectId) {
-  if(renderer) destroyCube();
-  container.innerHTML='';
-  _buildScene(container, subjectId);
+// ── unit grid positions ────────────────────────────────────────────────────
+function unitPosition(idx, total) {
+  const cols = Math.ceil(Math.sqrt(total));
+  const row  = Math.floor(idx / cols);
+  const col  = idx % cols;
+  const spacing = 5;
+  const offX = -((cols-1)*spacing)/2;
+  const offZ = -((Math.ceil(total/cols)-1)*spacing)/2;
+  return new THREE.Vector3(offX + col*spacing, 0, offZ + row*spacing);
 }
 
-function _buildScene(container, subjectId) {
-  scene=new THREE.Scene(); scene.background=new THREE.Color(0xF0F1F3);
-  scene.fog=new THREE.FogExp2(0xF2F2F4,0.04);
+// ── node positions on a unit cube face ────────────────────────────────────
+function nodePosition(idx, total, unitPos) {
+  const r     = 1.8;
+  const angle = (idx / Math.max(total,1)) * Math.PI * 2;
+  return new THREE.Vector3(
+    unitPos.x + r * Math.cos(angle),
+    unitPos.y + 1.5 + (idx % 2) * 0.6,
+    unitPos.z + r * Math.sin(angle)
+  );
+}
 
-  scene.add(new THREE.AmbientLight(0xffffff,0.9));
-  const dl=new THREE.DirectionalLight(0xffffff,0.5); dl.position.set(5,8,5); scene.add(dl);
-  const dl2=new THREE.DirectionalLight(0xaaaaff,0.25); dl2.position.set(-5,-4,-8); scene.add(dl2);
+export function initCube(wsId, subjectId) {
+  _wsId = wsId; _subjectId = subjectId;
+  linkMode = false; linkSource = null;
+  const container = document.getElementById('cube-container');
+  container.innerHTML = '';
+  unitMeshes = []; nodeMeshes = []; edgeLines = [];
 
-  const W=container.clientWidth||window.innerWidth, H=container.clientHeight||(window.innerHeight-52);
-  camera=new THREE.PerspectiveCamera(55,W/H,0.01,100); camera.position.set(0,0.5,3.5);
-
-  renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setSize(W,H); renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setClearColor(0x0A0B0E, 1);
   container.appendChild(renderer.domElement);
 
-  labelRenderer=new CSS2DRenderer(); labelRenderer.setSize(W,H);
-  labelRenderer.domElement.style.cssText='position:absolute;top:0;left:0;pointer-events:none;';
+  labelRenderer = new CSS2DRenderer();
+  labelRenderer.setSize(container.clientWidth, container.clientHeight);
+  labelRenderer.domElement.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
   container.appendChild(labelRenderer.domElement);
 
-  controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.dampingFactor=0.07; controls.minDistance=1.2; controls.maxDistance=7;
+  scene  = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x0A0B0E, 0.012);
 
-  _populateScene(subjectId);
+  camera = new THREE.PerspectiveCamera(55, container.clientWidth/container.clientHeight, 0.1, 500);
+  camera.position.set(0, 10, 22);
 
-  renderer.domElement.addEventListener('click', e=>onCubeClick(e,subjectId));
-  renderer.domElement.addEventListener('contextmenu', e=>onCubeCtx(e,subjectId));
-  window.addEventListener('resize',()=>onCubeResize(container));
-  Events.on('nodes:changed',()=>rebuildCubeScene(subjectId));
-  startCubeLoop();
+  const aL = new THREE.AmbientLight(0xffffff, 0.5);
+  scene.add(aL);
+  const dL = new THREE.DirectionalLight(0xffffff, 0.8);
+  dL.position.set(8, 16, 8);
+  scene.add(dL);
+  addStars();
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.07;
+  controls.minDistance   = 3;
+  controls.maxDistance   = 80;
+
+  rebuildCubeScene();
+
+  renderer.domElement.addEventListener('pointermove', onPointerMove);
+  renderer.domElement.addEventListener('pointerdown', onPointerDown);
+  renderer.domElement.addEventListener('pointerup',   onPointerUp);
+  renderer.domElement.addEventListener('click',       onClick);
+  renderer.domElement.addEventListener('contextmenu', onContextMenu);
+  window.addEventListener('resize', onResize);
+
+  if (animId) cancelAnimationFrame(animId);
+  animate();
 }
 
-function _populateScene(subjectId) {
-  nodeMeshes=[]; unitMeshes=[]; edgeMidMeshes=[];
-  const subj = Store.getSubject(subjectId);
-  if(!subj) return;
-  const color = new THREE.Color(subj.color||'#7C3AED');
-
-  // Outer cube shell (shaded faces)
-  const faceGeo=new THREE.BoxGeometry(CH*2,CH*2,CH*2);
-  const fOps=[0.14,0.08,0.20,0.05,0.16,0.10];
-  const fMats=fOps.map(o=>new THREE.MeshLambertMaterial({color,transparent:true,opacity:o,side:THREE.FrontSide}));
-  scene.add(new THREE.Mesh(faceGeo,fMats));
-
-  // Wireframe outer shell
-  scene.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(CH*2,CH*2,CH*2)),
-    new THREE.LineBasicMaterial({color,transparent:true,opacity:0.4})
-  ));
-
-  // Grid floor
-  const grid=new THREE.GridHelper(CH*2,8,0xCCCCCC,0xDDDDDD);
-  grid.position.y=-CH; scene.add(grid);
-
-  // Unit sub-cubes
-  Store.getUnits(subjectId).forEach(u=>addUnitMesh(u));
-
-  // Direct nodes (not in any unit)
-  Store.getNodes({subjectId, unitId:null}).forEach(n=>addNodeMesh(n,subj.color));
-
-  // Ghost nodes + edge lines
-  Store.getSubjectEdges(subjectId).forEach(e=>drawEdgeLine(e,subj,true));
+function addStars() {
+  const geo = new THREE.BufferGeometry();
+  const cnt = 600;
+  const pos = new Float32Array(cnt*3);
+  for (let i=0;i<cnt*3;i++) pos[i]=(Math.random()-0.5)*250;
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color:0x4B4F66, size:0.1, transparent:true, opacity:0.7 })));
 }
 
-/* ── Unit sub-cube ─────────────────────────── */
-function addUnitMesh(unit) {
-  const [x,y,z]=unit.position||[0,0,0];
-  const color=new THREE.Color(unit.color||'#7C3AED');
-  const US=0.36; // unit sub-cube size
+export function rebuildCubeScene() {
+  // Clear old objects
+  unitMeshes.forEach(u => scene.remove(u.group));
+  nodeMeshes.forEach(n => scene.remove(n.group));
+  edgeLines.forEach(l => scene.remove(l));
+  unitMeshes=[]; nodeMeshes=[]; edgeLines=[];
 
-  const group=new THREE.Group(); group.position.set(x,y,z);
+  const sub   = getSubject(_subjectId);
+  const units = getUnits(_subjectId);
 
-  // Shaded faces
-  const fGeo=new THREE.BoxGeometry(US,US,US);
-  const fMats=[0.22,0.14,0.30,0.10,0.25,0.18].map(o=>new THREE.MeshLambertMaterial({color,transparent:true,opacity:o}));
-  group.add(new THREE.Mesh(fGeo,fMats));
+  // Units
+  units.forEach((unit, idx) => {
+    const pos = unitPosition(idx, units.length);
+    addUnitMesh(unit, pos);
+  });
 
-  // Wireframe
-  const wMat=new THREE.LineBasicMaterial({color,linewidth:1.5});
-  group.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(US,US,US)),wMat));
+  // Nodes on this subject (no unitId)
+  const nodes = getNodes(_subjectId, null);
+  const unitCount = units.length;
+  nodes.forEach((node, idx) => {
+    // Use stored position or calculate default
+    const p = node.pos || { x: (idx%4-1.5)*3, y: unitCount>0?0:-0.5, z: Math.floor(idx/4)*3-2 };
+    addNodeMesh(node, new THREE.Vector3(p.x, p.y, p.z));
+  });
 
-  // Hit mesh
-  const hitMesh=new THREE.Mesh(new THREE.BoxGeometry(US*1.2,US*1.2,US*1.2),new THREE.MeshBasicMaterial({visible:false}));
-  hitMesh.userData={unitId:unit.id, wMat, origColor:color.clone()};
-  group.add(hitMesh); unitMeshes.push({mesh:hitMesh,unitId:unit.id});
-
-  // Node count badge
-  const nodeCount=Store.getNodes({subjectId:unit.subjectId,unitId:unit.id}).length;
-  const div=document.createElement('div'); div.className='unit-label';
-  div.innerHTML=`<div class="unit-label-inner" style="color:${unit.color}">${unit.name}<span style="opacity:0.6;font-size:9px;margin-left:3px">(${nodeCount})</span></div>`;
-  const lbl=new CSS2DObject(div); lbl.position.set(0,US*0.85,0); group.add(lbl);
-
-  scene.add(group);
+  // Edges
+  rebuildEdgeLines();
 }
 
-/* ── Node sphere ───────────────────────────── */
-function addNodeMesh(node,subjectColor) {
-  const [x,y,z]=node.position||[0,0,0];
-  const color=new THREE.Color(subjectColor||'#7C3AED');
-  const geo=new THREE.SphereGeometry(0.09,20,20);
-  const mat=new THREE.MeshStandardMaterial({color,emissive:color,emissiveIntensity:0.2,roughness:0.4,metalness:0.05});
-  const mesh=new THREE.Mesh(geo,mat); mesh.position.set(x,y,z);
-  mesh.userData={nodeId:node.id};
+function addUnitMesh(unit, pos) {
+  const col = parseInt(unit.color.replace('#',''),16);
+  const group = new THREE.Group();
+  group.position.copy(pos);
 
-  // Orbit ring
-  const ring=new THREE.Mesh(new THREE.TorusGeometry(0.145,0.007,8,32),new THREE.MeshBasicMaterial({color,transparent:true,opacity:0.4}));
-  ring.rotation.x=Math.PI/2; mesh.add(ring);
+  // Main box
+  const geo = new THREE.BoxGeometry(2.4, 2.4, 2.4);
+  const mat = new THREE.MeshStandardMaterial({
+    color: col, transparent: true, opacity: 0.75,
+    roughness: 0.3, metalness: 0.6,
+    emissive: col, emissiveIntensity: 0.12
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  group.add(mesh);
+
+  // Edges wireframe
+  const wire = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.6 })
+  );
+  group.add(wire);
 
   // Label
-  const div=document.createElement('div'); div.className='node-label';
-  div.innerHTML=`<div class="node-label-inner">${node.label}</div>`;
-  const lbl=new CSS2DObject(div); lbl.position.set(0,0.22,0); mesh.add(lbl);
+  const div = document.createElement('div');
+  div.className = 'unit-label';
+  div.innerHTML = `<div class="unit-label-inner" style="color:${unit.color};border-color:${unit.color}33">${unit.name}</div>`;
+  const lbl = new CSS2DObject(div);
+  lbl.position.set(0,-1.6,0);
+  group.add(lbl);
 
-  scene.add(mesh); nodeMeshes.push({mesh,nodeId:node.id});
+  group.userData = { unitId: unit.id, type:'unit', color: col, isUnit: true };
+  mesh.userData  = { unitId: unit.id, type:'unit', color: col, isUnit: true };
+  scene.add(group);
+  unitMeshes.push({ group, mesh, unitId: unit.id, pos });
 }
 
-/* ── Ghost + Edge ──────────────────────────── */
-function drawEdgeLine(edge,currentSubject,addGhosts) {
-  const fn=Store.getNode(edge.fromId), tn=Store.getNode(edge.toId);
-  if(!fn||!tn) return;
-  const sIds=new Set(Store.getNodes({subjectId:currentSubject.id}).map(n=>n.id));
-  if(!sIds.has(edge.fromId)&&!sIds.has(edge.toId)) return;
+function addNodeMesh(node, pos) {
+  const col = parseInt(node.color.replace('#',''),16);
+  const group = new THREE.Group();
+  group.position.copy(pos);
 
-  const fPos=fn.position||[0,0,0];
-  let   tPos=tn.position||[0,0,0];
+  const geo = new THREE.SphereGeometry(0.55, 20, 20);
+  const mat = new THREE.MeshStandardMaterial({
+    color: col, roughness: 0.2, metalness: 0.6,
+    emissive: col, emissiveIntensity: 0.25
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  group.add(mesh);
 
-  if(edge.isCross) {
-    const clamped=clampSurface(...tPos); tPos=[clamped.x,clamped.y,clamped.z];
-    if(addGhosts) {
-      const gs=Store.getSubject(tn.subjectId);
-      addGhostNode(tn, gs?.color||'#999', gs?.label||'?', clamped);
+  // Glow ring
+  const ringGeo = new THREE.RingGeometry(0.65, 0.75, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.rotation.x = -Math.PI/2;
+  group.add(ring);
+
+  // Label
+  const div = document.createElement('div');
+  div.className = 'node-label';
+  div.innerHTML = `<div class="node-label-inner">${node.name}</div>`;
+  const lbl = new CSS2DObject(div);
+  lbl.position.set(0, 0.9, 0);
+  group.add(lbl);
+
+  group.userData = { nodeId: node.id, type:'node', color: col };
+  mesh.userData  = { nodeId: node.id, type:'node', color: col };
+  scene.add(group);
+  nodeMeshes.push({ group, mesh, nodeId: node.id });
+}
+
+function rebuildEdgeLines() {
+  edgeLines.forEach(l => scene.remove(l));
+  edgeLines = [];
+  const edges = getEdges(_subjectId, null);
+  edges.forEach(edge => {
+    const fromM = nodeMeshes.find(m => m.nodeId === edge.fromNodeId);
+    const toM   = nodeMeshes.find(m => m.nodeId === edge.toNodeId);
+    if (!fromM || !toM) return;
+    const points = [fromM.group.position.clone(), toM.group.position.clone()];
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xA78BFA, transparent: true, opacity: 0.7, linewidth: 2 }));
+    line.userData = { edgeId: edge.id };
+    scene.add(line);
+    edgeLines.push(line);
+  });
+}
+
+function animate() {
+  animId = requestAnimationFrame(animate);
+  const t = Date.now()*0.001;
+  unitMeshes.forEach((u,i) => {
+    u.group.rotation.y = t*0.15 + i*0.8;
+    if (u.mesh === hovered) u.mesh.material.emissiveIntensity = 0.4 + Math.sin(t*4)*0.15;
+    else u.mesh.material.emissiveIntensity = 0.12;
+  });
+  nodeMeshes.forEach((n,i) => {
+    n.group.position.y += Math.sin(t*1.5+i)*0.0015;
+    if (n.mesh === hovered || (linkMode && n.nodeId === linkSource)) {
+      n.mesh.material.emissiveIntensity = 0.6 + Math.sin(t*5)*0.2;
+      n.group.scale.setScalar(1.12);
+    } else {
+      n.mesh.material.emissiveIntensity = 0.25;
+      n.group.scale.setScalar(1);
     }
+  });
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+
+// ── Pointer helpers ────────────────────────────────────────────────────────
+function getPointerNDC(e) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  return {
+    x: ((e.clientX-rect.left)/rect.width)*2-1,
+    y:-((e.clientY-rect.top)/rect.height)*2+1
+  };
+}
+function getIntersected(e, meshList) {
+  const n = getPointerNDC(e);
+  pointer.set(n.x, n.y);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(meshList, false);
+  return hits.length ? hits[0] : null;
+}
+function allPickable() {
+  return [
+    ...unitMeshes.map(u=>u.mesh),
+    ...nodeMeshes.map(n=>n.mesh)
+  ];
+}
+
+function onPointerMove(e) {
+  const hit = getIntersected(e, allPickable());
+  hovered = hit ? hit.object : null;
+  renderer.domElement.style.cursor = hovered ? 'pointer' : 'default';
+
+  // Drag
+  if (dragging) {
+    controls.enabled = false;
+    const n = getPointerNDC(e);
+    raycaster.setFromCamera(new THREE.Vector2(n.x,n.y), camera);
+    const target = new THREE.Vector3();
+    raycaster.ray.intersectPlane(dragPlane, target);
+    dragging.group.position.copy(target.sub(dragOffset));
+    // Persist position
+    if (dragging.nodeId) {
+      const p = dragging.group.position;
+      import('../core/store.js').then(s=>s.updateNode(dragging.nodeId,{pos:{x:p.x,y:p.y,z:p.z}}));
+    }
+    rebuildEdgeLines();
   }
-
-  const pts=[new THREE.Vector3(...fPos),new THREE.Vector3(...tPos)];
-  const mat=edge.isCross
-    ? new THREE.LineDashedMaterial({color:0xD97706,dashSize:0.07,gapSize:0.04,transparent:true,opacity:0.65})
-    : new THREE.LineBasicMaterial({color:new THREE.Color(currentSubject.color),transparent:true,opacity:0.55});
-  const ln=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),mat);
-  if(edge.isCross) ln.computeLineDistances();
-  scene.add(ln);
-
-  // Midpoint click sphere
-  const mid=new THREE.Vector3((fPos[0]+tPos[0])/2,(fPos[1]+tPos[1])/2,(fPos[2]+tPos[2])/2);
-  const midM=new THREE.Mesh(new THREE.SphereGeometry(0.055,8,8),new THREE.MeshBasicMaterial({visible:false}));
-  midM.position.copy(mid); midM.userData={edgeId:edge.id};
-  scene.add(midM); edgeMidMeshes.push({mesh:midM,edgeId:edge.id});
 }
 
-function addGhostNode(node,color,subjectLabel,pos) {
-  const mesh=new THREE.Mesh(
-    new THREE.SphereGeometry(0.065,12,12),
-    new THREE.MeshStandardMaterial({color:new THREE.Color(color),transparent:true,opacity:0.3,wireframe:true})
-  );
-  mesh.position.set(pos.x,pos.y,pos.z);
-  const div=document.createElement('div'); div.className='node-label';
-  div.innerHTML=`<div class="node-label-inner" style="opacity:0.5;font-style:italic">${subjectLabel}</div>`;
-  const lbl=new CSS2DObject(div); lbl.position.set(0,0.2,0); mesh.add(lbl);
-  scene.add(mesh);
+let _mouseDownPos = null;
+function onPointerDown(e) {
+  if (e.button !== 0) return;
+  _mouseDownPos = { x: e.clientX, y: e.clientY };
+  if (linkMode) return;
+  const hit = getIntersected(e, nodeMeshes.map(n=>n.mesh));
+  if (!hit) return;
+  const nodeEntry = nodeMeshes.find(n=>n.mesh===hit.object);
+  if (!nodeEntry) return;
+  e.stopPropagation();
+  dragging = nodeEntry;
+  controls.enabled = false;
+  // Build drag plane facing camera
+  const n = new THREE.Vector3().subVectors(camera.position, nodeEntry.group.position).normalize();
+  dragPlane.setFromNormalAndCoplanarPoint(n, nodeEntry.group.position);
+  const pointerNDC = getPointerNDC(e);
+  raycaster.setFromCamera(new THREE.Vector2(pointerNDC.x, pointerNDC.y), camera);
+  const ip = new THREE.Vector3();
+  raycaster.ray.intersectPlane(dragPlane, ip);
+  dragOffset.subVectors(ip, nodeEntry.group.position);
 }
 
-function clampSurface(x,y,z,s=CH*0.93){ return {x:Math.max(-s,Math.min(s,x)),y:Math.max(-s,Math.min(s,y)),z:Math.max(-s,Math.min(s,z))}; }
+function onPointerUp(e) {
+  dragging = null;
+  controls.enabled = true;
+}
 
-/* ── Click ─────────────────────────────────── */
-const raycaster=new THREE.Raycaster(), mouse=new THREE.Vector2();
+function onClick(e) {
+  // Only fire click if mouse didn't move (drag prevention)
+  if (_mouseDownPos) {
+    const dx = e.clientX - _mouseDownPos.x;
+    const dy = e.clientY - _mouseDownPos.y;
+    if (Math.sqrt(dx*dx+dy*dy) > 5) return;
+  }
+  const hit = getIntersected(e, allPickable());
+  if (!hit) return;
+  const obj = hit.object;
 
-function onCubeClick(e, subjectId) {
-  const r=renderer.domElement.getBoundingClientRect();
-  mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1;
-  raycaster.setFromCamera(mouse,camera);
-  const allMeshes=[...nodeMeshes.map(n=>n.mesh),...unitMeshes.map(u=>u.mesh),...edgeMidMeshes.map(m=>m.mesh)];
-  const hits=raycaster.intersectObjects(allMeshes);
-  if(!hits.length) return;
-  const obj=hits[0].object;
-
-  // Link mode
-  if(linkMode) {
-    const nm=nodeMeshes.find(n=>n.mesh===obj);
-    if(!nm) return;
-    if(!linkFirst) { linkFirst=nm.nodeId; obj.material.emissiveIntensity=0.9; Events.emit('linkmode:first',{nodeId:nm.nodeId}); }
-    else if(nm.nodeId!==linkFirst) { Events.emit('linkmode:second',{fromId:linkFirst,toId:nm.nodeId,subjectId}); exitLinkMode(); }
+  if (linkMode) {
+    // Link mode: picking second node
+    if (!obj.userData.nodeId) return;
+    const toId = obj.userData.nodeId;
+    if (toId === linkSource) return;
+    createEdge(_wsId, _subjectId, null, linkSource, toId, '');
+    setLinkMode(false);
+    rebuildEdgeLines();
     return;
   }
 
-  // Normal
-  const nm=nodeMeshes.find(n=>n.mesh===obj);
-  if(nm) { Router.goNodeWb(nm.nodeId); return; }
-  const um=unitMeshes.find(u=>u.mesh===obj);
-  if(um) { Router.goSubcube(um.unitId); return; }
-  const em=edgeMidMeshes.find(m=>m.mesh===obj);
-  if(em) { Router.goEdgeWb(em.edgeId); }
-}
-
-function onCubeCtx(e, subjectId) {
-  e.preventDefault();
-  const r=renderer.domElement.getBoundingClientRect();
-  mouse.x=((e.clientX-r.left)/r.width)*2-1; mouse.y=-((e.clientY-r.top)/r.height)*2+1;
-  raycaster.setFromCamera(mouse,camera);
-  const hits=raycaster.intersectObjects([...nodeMeshes.map(n=>n.mesh),...unitMeshes.map(u=>u.mesh)]);
-  const obj=hits.length>0?hits[0].object:null;
-  const nm=obj?nodeMeshes.find(n=>n.mesh===obj):null;
-  const um=obj?unitMeshes.find(u=>u.mesh===obj):null;
-
-  let items;
-  if(nm) {
-    const node=Store.getNode(nm.nodeId);
-    items=[
-      {icon:'📄',label:'Open Whiteboard',action:()=>Router.goNodeWb(nm.nodeId)},
-      {icon:'✏️',label:'Edit Node',action:()=>openEditNodeModal(nm.nodeId)},
-      {sep:true},
-      {icon:'🗑️',label:'Delete Node',danger:true,action:()=>openConfirmModal({
-        title:'Delete Node',confirmText:'Delete',
-        message:`Delete "<b>${node?.label}</b>"? All connections will be removed.`,
-        onConfirm:()=>{ Store.deleteNode(nm.nodeId); Events.emit('nodes:changed',{subjectId}); Events.emit('subjects:changed'); }
-      })},
-    ];
-  } else if(um) {
-    const unit=Store.getUnit(um.unitId);
-    items=[
-      {icon:'📦',label:'Open Unit',action:()=>Router.goSubcube(um.unitId)},
-      {icon:'✏️',label:'Edit Unit',action:()=>openEditUnitModal(um.unitId)},
-      {sep:true},
-      {icon:'🗑️',label:'Delete Unit',danger:true,action:()=>openConfirmModal({
-        title:'Delete Unit',confirmText:'Delete',
-        message:`Delete unit "<b>${unit?.name}</b>"? All nodes inside will be removed.`,
-        onConfirm:()=>{ Store.deleteUnit(um.unitId); Events.emit('nodes:changed',{subjectId}); }
-      })},
-    ];
-  } else {
-    items=[
-      {icon:'➕',label:'Add Concept Node',action:()=>openAddNodeModal({subjectId,unitId:null})},
-      {icon:'📦',label:'Add Unit (Sub-Cube)',action:()=>openAddUnitModal(subjectId)},
-      {sep:true},
-      {icon:'🔗',label:'Cross-Subject Link',action:()=>openCrossLinkModal(subjectId)},
-    ];
+  if (obj.userData.unitId) {
+    emit('nav:unit', { wsId: _wsId, subjectId: _subjectId, unitId: obj.userData.unitId });
+    return;
   }
-  showCtxMenu(e.clientX,e.clientY,items);
+  if (obj.userData.nodeId) {
+    emit('nav:node', { wsId: _wsId, subjectId: _subjectId, unitId: null, nodeId: obj.userData.nodeId });
+  }
 }
 
-/* ── Link mode ─────────────────────────────── */
-export function enterLinkMode() { linkMode=true; linkFirst=null; Events.emit('linkmode:enter'); }
-export function exitLinkMode()  { linkMode=false; linkFirst=null; Events.emit('linkmode:exit'); }
-export function resetCubeCamera() { camera?.position.set(0,0.5,3.5); controls?.reset(); }
-
-/* ── Loop ──────────────────────────────────── */
-function startCubeLoop() {
-  if(animId!==null) return;
-  function tick(){ animId=requestAnimationFrame(tick); controls.update(); renderer.render(scene,camera); labelRenderer.render(scene,camera); }
-  tick();
+function onContextMenu(e) {
+  e.preventDefault();
+  if (dragging) return;
+  const hit = getIntersected(e, allPickable());
+  if (!hit) return;
+  ctxTarget = hit.object.userData;
+  showCtxMenu(e.clientX, e.clientY);
 }
-function stopCubeLoop() { if(animId!==null) cancelAnimationFrame(animId); animId=null; }
-function onCubeResize(c) { const W=c.clientWidth,H=c.clientHeight; camera.aspect=W/H; camera.updateProjectionMatrix(); renderer.setSize(W,H); labelRenderer.setSize(W,H); }
 
-export function destroyCube() { stopCubeLoop(); Events.off('nodes:changed',()=>{}); }
-export function rebuildCubeScene(sid) { nodeMeshes=[]; unitMeshes=[]; edgeMidMeshes=[]; while(scene.children.length) scene.remove(scene.children[0]); _populateScene(sid); }
+function showCtxMenu(x, y) {
+  const menu = document.getElementById('ctxMenu');
+  const isUnit = !!ctxTarget.unitId;
+  const isNode = !!ctxTarget.nodeId;
+  menu.style.cssText = `display:block;left:${x}px;top:${y}px`;
+  menu.innerHTML = '';
 
-/* ── Ctx helper ─────────────────────────────── */
-function showCtxMenu(x,y,items) {
-  const el=document.getElementById('ctxMenu');
-  el.innerHTML=items.map((it,i)=>it.sep?`<div class="ctx-sep"></div>`:`<div class="ctx-item${it.danger?' danger':''}" data-i="${i}">${it.icon||''} ${it.label}</div>`).join('');
-  el.style.display='block'; el.style.left=`${Math.min(x,window.innerWidth-190)}px`; el.style.top=`${Math.min(y,window.innerHeight-140)}px`;
-  el.querySelectorAll('.ctx-item').forEach(el2=>{ const i=+el2.dataset.i; if(!isNaN(i)&&items[i]) el2.addEventListener('click',()=>{items[i].action?.(); el.style.display='none';}); });
+  if (isUnit) {
+    menu.innerHTML = `
+      <div class="ctx-item" id="ctxEnter">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+        Enter SubCube
+      </div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item danger" id="ctxDelete">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+        Delete SubCube
+      </div>`;
+    menu.querySelector('#ctxEnter').onclick = () => {
+      hideCtxMenu();
+      emit('nav:unit', { wsId: _wsId, subjectId: _subjectId, unitId: ctxTarget.unitId });
+    };
+    menu.querySelector('#ctxDelete').onclick = () => {
+      hideCtxMenu();
+      openModal({
+        title: 'Delete SubCube',
+        body: `<p style="color:var(--text-muted);font-size:13px">Delete this subcube and all its nodes?</p>`,
+        confirmText: 'Delete', confirmDanger: true,
+        onConfirm: () => { deleteUnit(ctxTarget.unitId); rebuildCubeScene(); }
+      });
+    };
+  } else if (isNode) {
+    menu.innerHTML = `
+      <div class="ctx-item" id="ctxOpen">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>
+        Open Node
+      </div>
+      <div class="ctx-item" id="ctxLink">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+        Link to Node
+      </div>
+      <div class="ctx-item" id="ctxCrossLink">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><path d="M4 6h16M4 12h16M4 18h7"/><path d="M15 15l3 3 3-3"/><path d="M18 18V9"/></svg>
+        Cross-Layer Link
+      </div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item danger" id="ctxDelete">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="13" height="13"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+        Delete Node
+      </div>`;
+    menu.querySelector('#ctxOpen').onclick = () => {
+      hideCtxMenu();
+      emit('nav:node', { wsId: _wsId, subjectId: _subjectId, unitId: null, nodeId: ctxTarget.nodeId });
+    };
+    menu.querySelector('#ctxLink').onclick = () => {
+      hideCtxMenu();
+      setLinkMode(true, ctxTarget.nodeId);
+    };
+    menu.querySelector('#ctxCrossLink').onclick = () => {
+      hideCtxMenu();
+      openCrossLinkModal(_wsId, ctxTarget.nodeId, () => rebuildCubeScene());
+    };
+    menu.querySelector('#ctxDelete').onclick = () => {
+      hideCtxMenu();
+      openModal({
+        title: 'Delete Node',
+        body: `<p style="color:var(--text-muted);font-size:13px">Delete this node and all its connections?</p>`,
+        confirmText: 'Delete', confirmDanger: true,
+        onConfirm: () => { deleteNode(ctxTarget.nodeId); rebuildCubeScene(); }
+      });
+    };
+  }
+}
+function hideCtxMenu() { document.getElementById('ctxMenu').style.display='none'; }
+document.addEventListener('click', hideCtxMenu);
+
+export function setLinkMode(active, sourceNodeId) {
+  linkMode   = active;
+  linkSource = sourceNodeId || null;
+  const banner = document.getElementById('linkModeBanner');
+  if (banner) banner.style.display = active ? 'flex' : 'none';
+}
+
+export function openAddUnitModal(wsId, subjectId) {
+  let chosenColor = PALETTE[Math.floor(Math.random()*PALETTE.length)];
+  const swatches = PALETTE.map(c=>
+    `<button class="color-swatch${c===chosenColor?' selected':''}" data-color="${c}" style="background:${c}"></button>`
+  ).join('');
+  openModal({
+    title: 'Add SubCube',
+    body: `
+      <div class="form-group">
+        <label class="form-label">SubCube Name</label>
+        <input class="form-input" id="unitNameInput" placeholder="e.g. Chapter 3" autofocus/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Color</label>
+        <div class="color-swatch-grid">${swatches}</div>
+      </div>`,
+    confirmText: 'Add SubCube',
+    onConfirm: () => {
+      const name = document.getElementById('unitNameInput')?.value?.trim();
+      if (!name) return false;
+      createUnit(wsId, subjectId, name, chosenColor);
+      rebuildCubeScene();
+    }
+  });
+  setTimeout(() => {
+    document.querySelectorAll('.color-swatch[data-color]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.color-swatch[data-color]').forEach(b=>b.classList.remove('selected'));
+        btn.classList.add('selected');
+        chosenColor = btn.dataset.color;
+      });
+    });
+  }, 0);
+}
+
+export function openAddNodeModal(wsId, subjectId, unitId) {
+  let chosenColor = PALETTE[Math.floor(Math.random()*PALETTE.length)];
+  const swatches = PALETTE.map(c=>
+    `<button class="color-swatch${c===chosenColor?' selected':''}" data-color="${c}" style="background:${c}"></button>`
+  ).join('');
+  openModal({
+    title: unitId ? 'Add Node to SubCube' : 'Add Node',
+    body: `
+      <div class="form-group">
+        <label class="form-label">Node Name</label>
+        <input class="form-input" id="nodeNameInput" placeholder="e.g. Introduction" autofocus/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Color</label>
+        <div class="color-swatch-grid">${swatches}</div>
+      </div>`,
+    confirmText: 'Add Node',
+    onConfirm: () => {
+      const name = document.getElementById('nodeNameInput')?.value?.trim();
+      if (!name) return false;
+      const spreadPos = { x: (Math.random()-0.5)*10, y: 1, z: (Math.random()-0.5)*10 };
+      createNode(wsId, subjectId, unitId||null, name, chosenColor, spreadPos);
+      rebuildCubeScene();
+    }
+  });
+  setTimeout(() => {
+    document.querySelectorAll('.color-swatch[data-color]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.color-swatch[data-color]').forEach(b=>b.classList.remove('selected'));
+        btn.classList.add('selected');
+        chosenColor = btn.dataset.color;
+      });
+    });
+  }, 0);
+}
+
+function onResize() {
+  const c = document.getElementById('cube-container');
+  if (!c||!renderer) return;
+  camera.aspect = c.clientWidth/c.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(c.clientWidth,c.clientHeight);
+  labelRenderer.setSize(c.clientWidth,c.clientHeight);
+}
+
+export function destroyCube() {
+  if (animId) cancelAnimationFrame(animId);
+  renderer?.dispose();
+  const c = document.getElementById('cube-container');
+  if (c) c.innerHTML='';
+  window.removeEventListener('resize', onResize);
 }
