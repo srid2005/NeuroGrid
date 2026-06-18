@@ -3,7 +3,7 @@
 ═══════════════════════════════════════════ */
 import { initModal } from './ui/modal.js';
 import { showScreen } from './core/router.js';
-import { on } from './core/events.js';
+import { on, emit } from './core/events.js';
 import {
   getCurrentUser, loginUser, registerUser, logoutUser,
   getWorkspace, getSubject, getUnit, getNode
@@ -93,9 +93,10 @@ on('nav:workspace', ({ wsId }) => {
     { label:'Workspaces', click:goHome },
     { label: ws?.name||'Workspace', active:true }
   ]);
-  initGalaxy(wsId);
+  // FIX: showScreen BEFORE init so container has non-zero dimensions for Three.js
   showScreen('galaxy');
   setupGalaxyHUD();
+  initGalaxy(wsId);
 });
 
 on('nav:subject', ({ wsId, subjectId }) => {
@@ -108,9 +109,10 @@ on('nav:subject', ({ wsId, subjectId }) => {
     { label:ws?.name||'WS', click:()=>on_backToGalaxy() },
     { label:sub?.name||'Subject', active:true }
   ]);
-  initCube(wsId, subjectId);
+  // FIX: showScreen BEFORE init so container has non-zero dimensions for Three.js
   showScreen('cube');
   setupCubeHUD(wsId, subjectId);
+  initCube(wsId, subjectId);
 });
 
 on('nav:unit', ({ wsId, subjectId, unitId }) => {
@@ -125,9 +127,10 @@ on('nav:unit', ({ wsId, subjectId, unitId }) => {
     { label:sub?.name||'Subject', click:()=>on_backToCube() },
     { label:unit?.name||'SubCube', active:true }
   ]);
-  initSubcube(wsId, subjectId, unitId);
+  // FIX: showScreen BEFORE init so container has non-zero dimensions for Three.js
   showScreen('subcube');
   setupSubcubeHUD(wsId, subjectId, unitId);
+  initSubcube(wsId, subjectId, unitId);
 });
 
 on('nav:node', ({ wsId, subjectId, unitId, nodeId }) => {
@@ -137,47 +140,68 @@ on('nav:node', ({ wsId, subjectId, unitId, nodeId }) => {
   const sub  = getSubject(subjectId);
   const unit = unitId ? getUnit(unitId) : null;
   const node = getNode(nodeId);
-  const backFn = unitId
-    ? () => { destroySubcube(); initSubcube(wsId,subjectId,unitId); showScreen('subcube'); }
-    : () => on_backToCube();
+  // FIX: breadcrumb subcube back link — showScreen before init
   setBreadcrumb([
     { label:'Workspaces', click:goHome },
     { label:ws?.name||'WS', click:()=>on_backToGalaxy() },
     { label:sub?.name||'Subject', click:()=>on_backToCube() },
-    ...(unit ? [{ label:unit.name, click:()=>{ destroySubcube(); initSubcube(wsId,subjectId,unitId); showScreen('subcube'); setupSubcubeHUD(wsId,subjectId,unitId); } }] : []),
+    ...(unit ? [{ label:unit.name, click:()=>on_backToSubcube() }] : []),
     { label:node?.name||'Node', active:true }
   ]);
-  initNodeWb(wsId, subjectId, unitId, nodeId);
+  // FIX: showScreen BEFORE init so canvas container has non-zero dimensions
   showScreen('node-wb');
+  setupNodeWbHUD();
+  initNodeWb(wsId, subjectId, unitId, nodeId);
 });
 
 on('nav:edge', ({ wsId, subjectId, unitId, edgeId }) => {
   destroyEdgeWb();
   _edgeId=edgeId;
-  initEdgeWb(edgeId);
+  // FIX: showScreen BEFORE init
   showScreen('edge-wb');
+  setupEdgeWbHUD();
+  initEdgeWb(edgeId);
 });
 
 function on_backToGalaxy() {
   destroyCube(); destroySubcube(); destroyNodeWb(); destroyEdgeWb();
   const ws = getWorkspace(_wsId);
-  initGalaxy(_wsId);
-  showScreen('galaxy');
-  setupGalaxyHUD();
   const wsN = ws?.name||'WS';
   setBreadcrumb([{ label:'Workspaces', click:goHome }, { label:wsN, active:true }]);
+  // FIX: showScreen BEFORE init
+  showScreen('galaxy');
+  setupGalaxyHUD();
+  initGalaxy(_wsId);
 }
 function on_backToCube() {
   destroySubcube(); destroyNodeWb(); destroyEdgeWb();
   const ws=getWorkspace(_wsId); const sub=getSubject(_subjectId);
-  initCube(_wsId, _subjectId);
-  showScreen('cube');
-  setupCubeHUD(_wsId, _subjectId);
   setBreadcrumb([
     { label:'Workspaces', click:goHome },
     { label:ws?.name||'WS', click:on_backToGalaxy },
     { label:sub?.name||'Subject', active:true }
   ]);
+  // FIX: showScreen BEFORE init
+  showScreen('cube');
+  setupCubeHUD(_wsId, _subjectId);
+  initCube(_wsId, _subjectId);
+}
+
+function on_backToSubcube() {
+  destroyNodeWb(); destroyEdgeWb();
+  const ws   = getWorkspace(_wsId);
+  const sub  = getSubject(_subjectId);
+  const unit = getUnit(_unitId);
+  setBreadcrumb([
+    { label:'Workspaces', click:goHome },
+    { label:ws?.name||'WS', click:on_backToGalaxy },
+    { label:sub?.name||'Subject', click:on_backToCube },
+    { label:unit?.name||'SubCube', active:true }
+  ]);
+  // FIX: showScreen BEFORE init
+  showScreen('subcube');
+  setupSubcubeHUD(_wsId, _subjectId, _unitId);
+  initSubcube(_wsId, _subjectId, _unitId);
 }
 
 // ── HUD wiring ─────────────────────────────────────────────────────────────
@@ -217,6 +241,39 @@ function setupSubcubeHUD(wsId, subjectId, unitId) {
     setSubLinkMode(false);
     document.getElementById('subcubeLinkBtn')?.classList.remove('active');
   };
+}
+
+// FIX: Wire node-wb back button with proper SPA navigation (was using history.back())
+function setupNodeWbHUD() {
+  const btn = document.getElementById('nodeWbBackBtn');
+  if (btn) {
+    // Replace any existing listener by cloning
+    const fresh = btn.cloneNode(true);
+    btn.parentNode.replaceChild(fresh, btn);
+    fresh.addEventListener('click', () => {
+      if (_unitId) on_backToSubcube();
+      else on_backToCube();
+    });
+  }
+}
+
+// FIX: Wire edge-wb back button with proper SPA navigation (was using history.back())
+function setupEdgeWbHUD() {
+  const btn = document.getElementById('edgeWbBackBtn');
+  if (btn) {
+    const fresh = btn.cloneNode(true);
+    btn.parentNode.replaceChild(fresh, btn);
+    fresh.addEventListener('click', () => {
+      if (_nodeId) {
+        // Navigate back to the node whiteboard
+        emit('nav:node', { wsId: _wsId, subjectId: _subjectId, unitId: _unitId, nodeId: _nodeId });
+      } else if (_unitId) {
+        on_backToSubcube();
+      } else {
+        on_backToCube();
+      }
+    });
+  }
 }
 
 // ── Breadcrumb ─────────────────────────────────────────────────────────────

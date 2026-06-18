@@ -146,6 +146,7 @@ export function rebuildScene() {
 
 function animate() {
   animId = requestAnimationFrame(animate);
+  if (!renderer || !scene || !camera) return;
   const t = Date.now()*0.001;
   cubes.forEach((c, i) => {
     c.mesh.rotation.x = Math.sin(t*0.4 + i)*0.12;
@@ -271,8 +272,11 @@ export function openAddSubjectModal(wsId) {
 }
 
 export function destroyGalaxy() {
-  if (animId) cancelAnimationFrame(animId);
-  renderer?.dispose();
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+  if (renderer) { renderer.dispose(); renderer = null; }
+  labelRenderer = null;
+  scene = null; camera = null; controls = null;
+  cubes = []; hovered = null;
   const c = document.getElementById('galaxy-container');
   if (c) c.innerHTML = '';
   window.removeEventListener('resize', onResize);

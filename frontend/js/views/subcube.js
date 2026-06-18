@@ -179,6 +179,7 @@ function rebuildEdgeLines() {
 
 function animate() {
   animId=requestAnimationFrame(animate);
+  if(!renderer||!scene||!camera) return;
   const t=Date.now()*0.001;
   nodeMeshes.forEach((n,i)=>{
     n.group.position.y+=Math.sin(t*1.2+i*1.5)*0.0008;
@@ -384,8 +385,12 @@ function onResize() {
 }
 
 export function destroySubcube() {
-  if(animId) cancelAnimationFrame(animId);
-  renderer?.dispose();
+  if(animId) { cancelAnimationFrame(animId); animId = null; }
+  if(renderer) { renderer.dispose(); renderer = null; }
+  labelRenderer = null;
+  scene = null; camera = null; controls = null;
+  nodeMeshes=[]; edgeLines=[];
+  linkMode=false; linkSource=null; dragging=null; hovered=null;
   const c=document.getElementById('subcube-container');
   if(c) c.innerHTML='';
   window.removeEventListener('resize',onResize);

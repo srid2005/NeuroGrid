@@ -232,6 +232,7 @@ function rebuildEdgeLines() {
 
 function animate() {
   animId = requestAnimationFrame(animate);
+  if (!renderer || !scene || !camera) return;
   const t = Date.now()*0.001;
   unitMeshes.forEach((u,i) => {
     u.group.rotation.y = t*0.15 + i*0.8;
@@ -528,8 +529,12 @@ function onResize() {
 }
 
 export function destroyCube() {
-  if (animId) cancelAnimationFrame(animId);
-  renderer?.dispose();
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+  if (renderer) { renderer.dispose(); renderer = null; }
+  labelRenderer = null;
+  scene = null; camera = null; controls = null;
+  unitMeshes = []; nodeMeshes = []; edgeLines = [];
+  linkMode = false; linkSource = null; dragging = null; hovered = null;
   const c = document.getElementById('cube-container');
   if (c) c.innerHTML='';
   window.removeEventListener('resize', onResize);

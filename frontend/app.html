@@ -387,11 +387,8 @@
 <script type="module" src="js/app.js"></script>
 
 <script>
-// Wire back buttons not managed by app.js module
+// Auth form enter-key shortcuts (non-module inline convenience listeners)
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('nodeWbBackBtn')?.addEventListener('click', () => history.back());
-  document.getElementById('edgeWbBackBtn')?.addEventListener('click', () => history.back());
-  // Enter key on auth
   document.getElementById('loginPass')?.addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('loginBtn').click(); });
   document.getElementById('regPass')?.addEventListener('keydown',   e => { if(e.key==='Enter') document.getElementById('registerBtn').click(); });
 });
